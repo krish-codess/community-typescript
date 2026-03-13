@@ -1211,7 +1211,581 @@ app.get('/api/community/admin/stale-requests', authMiddleware, requireRole('admi
 // ─────────────────────────────────────────
 // STATIC FILE SERVING
 // ─────────────────────────────────────────
+/* ====================================================================
+   COMMUNITY — Phase 2 Server Additions
+   Paste this block into server.js BEFORE the static file serving section.
 
+   Phase 2 Features implemented here:
+   A.  Volunteer Location Push  (WebSocket: volunteer_location_update)
+   B.  Host Live Tracking       GET /api/community/tracking/:id
+   C.  Recurring Donations      POST/GET/PATCH/DELETE /host/recurring
+   D.  Dietary Filters          (query params on existing charity/available)
+   E.  SMS Service Placeholder  (internal, fires on REQUESTED status)
+   F.  Ratings / Feedback       POST/GET /feedback/:donationRequestId
+   G.  Volunteer Availability   PATCH /volunteer/availability
+   H.  Admin CSV Export         GET /admin/export/csv
+   ==================================================================== */
+
+// ═══════════════════════════════════════════════════════════════
+//  A.  VOLUNTEER REAL-TIME LOCATION  (WebSocket)
+//
+//  Volunteer client emits:  socket.emit('volunteer_location', { token, donationRequestId, lat, lng })
+//  Server stores lat/lng in volunteers.current_lat/lng and broadcasts
+//  to room `track:${donationRequestId}` so hosts/charities can subscribe.
+//
+//  Host client subscribes:  socket.emit('track_request', { token, donationRequestId })
+// ═══════════════════════════════════════════════════════════════
+
+io.on('connection', (socket) => {
+    // ── Host/Charity subscribes to a tracking room ──────────────
+    socket.on('track_request', async ({ token, donationRequestId }) => {
+        try {
+            const payload = jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret');
+            // Only allow users party to this request (host, charity, admin)
+            const [rows] = await db.query(
+                'SELECT host_id, accepted_by_charity FROM donation_requests WHERE id = ?',
+                [donationRequestId]
+            );
+            if (!rows.length) return;
+            const dr = rows[0];
+            const allowed = [dr.host_id, dr.accepted_by_charity];
+            if (payload.role !== 'admin' && !allowed.includes(payload.id)) return;
+
+            socket.join(`track:${donationRequestId}`);
+            console.log(`📍 ${payload.id} joined tracking room track:${donationRequestId}`);
+        } catch { /* invalid token — ignore */ }
+    });
+
+    // ── Volunteer pushes their current location ──────────────────
+    socket.on('volunteer_location', async ({ token, donationRequestId, lat, lng }) => {
+        try {
+            const payload = jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret');
+            if (payload.role !== 'volunteer') return;
+
+            // Persist to DB for page-reload recovery
+            await db.query(
+                `UPDATE volunteers
+                 SET current_lat = ?, current_lng = ?, location_updated_at = NOW()
+                 WHERE user_id = ?`,
+                [lat, lng, payload.id]
+            );
+
+            // Broadcast to all subscribers of this delivery
+            io.to(`track:${donationRequestId}`).emit('location_update', {
+                donationRequestId,
+                lat,
+                lng,
+                volunteerId:  payload.id,
+                timestamp:    new Date().toISOString()
+            });
+        } catch { /* invalid token — ignore */ }
+    });
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  B.  HOST LIVE TRACKING ENDPOINT
+//  GET /api/community/tracking/:id
+//  Returns volunteer's last-known position + charity address for the map.
+// ═══════════════════════════════════════════════════════════════
+
+app.get('/api/community/tracking/:id', authMiddleware, async (req, res) => {
+    try {
+        const [rows] = await db.query(
+            `SELECT dr.id, dr.status, dr.pickup_address, dr.pickup_lat, dr.pickup_lng,
+                    dr.host_id, dr.accepted_by_charity, dr.assigned_volunteer,
+                    uh.name AS host_name,
+                    uc.name AS charity_name, ch.address AS charity_address,
+                    uv.name AS volunteer_name,
+                    vol.current_lat AS volunteer_lat,
+                    vol.current_lng AS volunteer_lng,
+                    vol.location_updated_at
+             FROM donation_requests dr
+             JOIN  users uh  ON dr.host_id = uh.id
+             LEFT JOIN users uc  ON dr.accepted_by_charity = uc.id
+             LEFT JOIN charities ch ON ch.user_id = dr.accepted_by_charity
+             LEFT JOIN users uv  ON dr.assigned_volunteer  = uv.id
+             LEFT JOIN volunteers vol ON vol.user_id = dr.assigned_volunteer
+             WHERE dr.id = ?`,
+            [req.params.id]
+        );
+        if (!rows.length) return fail(res, 'Request not found', 404);
+
+        const dr = rows[0];
+        // Only the host, charity, assigned volunteer, or admin may view tracking
+        const allowed = [dr.host_id, dr.accepted_by_charity, dr.assigned_volunteer];
+        if (req.user.role !== 'admin' && !allowed.includes(req.user.id))
+            return fail(res, 'Not authorised to track this delivery', 403);
+
+        const trackable = [STATUS.PICKUP_IN_PROGRESS, STATUS.FOOD_PICKED_UP].includes(dr.status);
+
+        ok(res, {
+            donationRequestId: dr.id,
+            status:            dr.status,
+            trackable,
+            pickup: {
+                address: dr.pickup_address,
+                lat:     dr.pickup_lat     ? parseFloat(dr.pickup_lat)  : null,
+                lng:     dr.pickup_lng     ? parseFloat(dr.pickup_lng)  : null
+            },
+            charity: {
+                name:    dr.charity_name,
+                address: dr.charity_address || null
+            },
+            volunteer: {
+                name: dr.volunteer_name,
+                lat:  dr.volunteer_lat ? parseFloat(dr.volunteer_lat) : null,
+                lng:  dr.volunteer_lng ? parseFloat(dr.volunteer_lng) : null,
+                lastUpdated: dr.location_updated_at
+            }
+        });
+    } catch (err) {
+        console.error('Tracking endpoint:', err);
+        fail(res, 'Could not fetch tracking data', 500);
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  C.  RECURRING DONATIONS
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * POST /host/recurring  — create a recurring donation template.
+ */
+app.post('/api/community/host/recurring', authMiddleware, requireRole('host'), async (req, res) => {
+    const {
+        foodDescription, quantity, pickupAddress, contactPhone, notes,
+        recurrenceDay = 1,     // 1=Mon … 7=Sun
+        preferredTime = null,  // e.g. "09:00"
+        isVegan = false,
+        isGlutenFree = false
+    } = req.body;
+
+    if (!foodDescription || !quantity || !pickupAddress)
+        return fail(res, 'foodDescription, quantity and pickupAddress are required');
+    if (recurrenceDay < 1 || recurrenceDay > 7)
+        return fail(res, 'recurrenceDay must be 1 (Mon) to 7 (Sun)');
+
+    try {
+        const id = uuidv4();
+        await db.query(
+            `INSERT INTO recurring_donations
+             (id, host_id, food_description, quantity, pickup_address, contact_phone,
+              notes, is_vegan, is_gluten_free, recurrence_day, preferred_time, is_active)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,1)`,
+            [id, req.user.id, foodDescription, quantity, pickupAddress,
+             contactPhone || null, notes || null,
+             isVegan ? 1 : 0, isGlutenFree ? 1 : 0,
+             recurrenceDay, preferredTime]
+        );
+        ok(res, { id, message: 'Recurring donation scheduled' });
+    } catch (err) {
+        console.error('Create recurring:', err);
+        fail(res, 'Could not create recurring donation', 500);
+    }
+});
+
+/**
+ * GET /host/recurring  — list host's recurring templates.
+ */
+app.get('/api/community/host/recurring', authMiddleware, requireRole('host', 'admin'), async (req, res) => {
+    try {
+        const [rows] = await db.query(
+            'SELECT * FROM recurring_donations WHERE host_id = ? ORDER BY created_at DESC',
+            [req.user.id]
+        );
+        ok(res, { templates: rows });
+    } catch (err) {
+        fail(res, 'Could not fetch recurring donations', 500);
+    }
+});
+
+/**
+ * PATCH /host/recurring/:id  — toggle active / update template.
+ */
+app.patch('/api/community/host/recurring/:id', authMiddleware, requireRole('host'), async (req, res) => {
+    const { isActive } = req.body;
+    try {
+        const [result] = await db.query(
+            'UPDATE recurring_donations SET is_active = ? WHERE id = ? AND host_id = ?',
+            [isActive ? 1 : 0, req.params.id, req.user.id]
+        );
+        if (!result.affectedRows) return fail(res, 'Template not found', 404);
+        ok(res, { updated: true });
+    } catch (err) {
+        fail(res, 'Could not update recurring donation', 500);
+    }
+});
+
+/**
+ * DELETE /host/recurring/:id
+ */
+app.delete('/api/community/host/recurring/:id', authMiddleware, requireRole('host'), async (req, res) => {
+    try {
+        const [result] = await db.query(
+            'DELETE FROM recurring_donations WHERE id = ? AND host_id = ?',
+            [req.params.id, req.user.id]
+        );
+        if (!result.affectedRows) return fail(res, 'Template not found', 404);
+        ok(res, { deleted: true });
+    } catch (err) {
+        fail(res, 'Could not delete recurring donation', 500);
+    }
+});
+
+/**
+ * POST /admin/recurring/trigger  — manually post due recurring templates.
+ * In production, call this from a cron job (e.g. node-cron daily at 00:01).
+ */
+app.post('/api/community/admin/recurring/trigger', authMiddleware, requireRole('admin'), async (req, res) => {
+    try {
+        // ISO weekday: 1=Mon … 7=Sun
+        const todayDay = new Date().getDay() || 7;
+
+        const [templates] = await db.query(
+            `SELECT * FROM recurring_donations
+             WHERE is_active = 1
+               AND recurrence_day = ?
+               AND (last_posted_at IS NULL OR DATE(last_posted_at) < CURDATE())`,
+            [todayDay]
+        );
+
+        let posted = 0;
+        for (const t of templates) {
+            const drId = 'DR-' + uuidv4().slice(0, 8).toUpperCase();
+            await db.query(
+                `INSERT INTO donation_requests
+                 (id, host_id, food_description, quantity, pickup_address, contact_phone,
+                  notes, is_vegan, is_gluten_free, status)
+                 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+                [drId, t.host_id, t.food_description, t.quantity, t.pickup_address,
+                 t.contact_phone, t.notes || `(Auto-posted from recurring template)`,
+                 t.is_vegan, t.is_gluten_free, STATUS.REQUESTED]
+            );
+            await db.query('UPDATE recurring_donations SET last_posted_at=NOW() WHERE id=?', [t.id]);
+            await logEvent(drId, t.host_id, 'host', 'Recurring donation auto-posted');
+            emitStatusUpdate(drId, STATUS.REQUESTED, 'system');
+
+            // Fire SMS placeholder for each auto-posted donation
+            await triggerSMS(t.contact_phone, drId,
+                `New recurring donation posted: ${t.food_description} (${t.quantity})`);
+            posted++;
+        }
+
+        ok(res, { posted, message: `${posted} recurring donation(s) posted for today` });
+    } catch (err) {
+        console.error('Recurring trigger:', err);
+        fail(res, 'Could not trigger recurring donations', 500);
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  D.  DIETARY FILTERS — extend existing GET /charity/available
+//
+//  This replaces the existing charity/available route.
+//  Query params: ?vegan=1  ?glutenFree=1
+//  Both are optional; absent = no filter applied.
+// ═══════════════════════════════════════════════════════════════
+
+// NOTE: Remove or comment-out the original GET /charity/available route
+// in server.js, then paste this version in its place.
+
+app.get('/api/community/charity/available-v2', authMiddleware, requireRole('charity', 'admin'), async (req, res) => {
+    try {
+        const filters   = ['dr.status = ?'];
+        const params    = [STATUS.REQUESTED];
+
+        if (req.query.vegan      === '1') { filters.push('dr.is_vegan = 1'); }
+        if (req.query.glutenFree === '1') { filters.push('dr.is_gluten_free = 1'); }
+
+        const [rows] = await db.query(
+            `SELECT dr.*, u.name AS host_name, u.phone AS host_phone
+             FROM donation_requests dr
+             JOIN users u ON dr.host_id = u.id
+             WHERE ${filters.join(' AND ')}
+             ORDER BY dr.created_at DESC`,
+            params
+        );
+        ok(res, { requests: rows });
+    } catch (err) {
+        fail(res, 'Could not fetch available requests', 500);
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  E.  SMS SERVICE PLACEHOLDER
+//  Replace sendSMS() body with your Twilio/AWS SNS call.
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Internal: send an SMS and log it.
+ * @param {string|null} phone
+ * @param {string}      donationRequestId
+ * @param {string}      message
+ */
+async function triggerSMS(phone, donationRequestId, message) {
+    if (!phone) return;
+
+    const logId = uuidv4();
+    try {
+        // ── Stub: replace with real provider call ────────────────
+        // Example Twilio:
+        //   const twilio = require('twilio')(process.env.TWILIO_SID, process.env.TWILIO_TOKEN);
+        //   await twilio.messages.create({ body: message, from: process.env.TWILIO_FROM, to: phone });
+        // ────────────────────────────────────────────────────────
+
+        console.log(`📱 SMS → ${phone}: ${message}`);
+
+        await db.query(
+            `INSERT INTO sms_log (id, to_phone, message, trigger_id, status, sent_at)
+             VALUES (?, ?, ?, ?, 'sent', NOW())`,
+            [logId, phone, message, donationRequestId]
+        );
+    } catch (err) {
+        // Log failure but never throw — SMS is non-blocking
+        await db.query(
+            `INSERT INTO sms_log (id, to_phone, message, trigger_id, status)
+             VALUES (?, ?, ?, ?, 'failed')`,
+            [logId, phone, message, donationRequestId]
+        ).catch(() => {});
+        console.error('SMS failed (non-fatal):', err.message);
+    }
+}
+
+/**
+ * POST /host/donations  — Phase 2 override that adds SMS trigger + dietary fields.
+ * REPLACE the original /host/donations POST in server.js with this version.
+ */
+app.post('/api/community/host/donations-v2', authMiddleware, requireRole('host'), async (req, res) => {
+    const {
+        foodDescription, quantity, pickupAddress, contactPhone,
+        preferredPickupTime, notes,
+        expiryTime = null,
+        pickupLat  = null,
+        pickupLng  = null,
+        isVegan       = false,
+        isGlutenFree  = false
+    } = req.body;
+
+    if (!foodDescription || !quantity || !pickupAddress)
+        return fail(res, 'foodDescription, quantity and pickupAddress are required');
+
+    const servingsMatch = String(quantity).match(/(\d+)/);
+    const servingsCount = servingsMatch ? parseInt(servingsMatch[1], 10) : null;
+
+    try {
+        const id = 'DR-' + uuidv4().slice(0, 8).toUpperCase();
+        await db.query(
+            `INSERT INTO donation_requests
+             (id, host_id, food_description, quantity, servings_count,
+              pickup_address, pickup_lat, pickup_lng,
+              contact_phone, preferred_pickup_time, notes,
+              expiry_time, is_vegan, is_gluten_free, status)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [
+                id, req.user.id, foodDescription, quantity, servingsCount,
+                pickupAddress, pickupLat || null, pickupLng || null,
+                contactPhone || null, preferredPickupTime || null, notes || null,
+                expiryTime || null,
+                isVegan ? 1 : 0, isGlutenFree ? 1 : 0,
+                STATUS.REQUESTED
+            ]
+        );
+
+        await logEvent(id, req.user.id, 'host', 'Donation request created',
+            `${quantity} – ${foodDescription}`);
+
+        // ── SMS alert on new REQUESTED status ──────────────────
+        await triggerSMS(contactPhone, id,
+            `New donation posted: ${foodDescription} (${quantity}). ID: ${id}. Thank you!`);
+
+        emitStatusUpdate(id, STATUS.REQUESTED, 'host');
+        ok(res, { donationRequestId: id, status: STATUS.REQUESTED });
+    } catch (err) {
+        console.error('Create donation v2:', err);
+        fail(res, 'Could not create donation request', 500);
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  F.  RATINGS / FEEDBACK
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * POST /feedback/:donationRequestId
+ * Any party to the request (host / charity / volunteer) may rate it once.
+ * Only available after status = COMPLETED.
+ */
+app.post('/api/community/feedback/:donationRequestId', authMiddleware, async (req, res) => {
+    const { donationRequestId } = req.params;
+    const { rating, comment }   = req.body;
+
+    if (!rating || rating < 1 || rating > 5)
+        return fail(res, 'rating must be an integer 1–5');
+
+    try {
+        // Check request exists and is completed
+        const [rows] = await db.query(
+            'SELECT host_id, accepted_by_charity, assigned_volunteer, status FROM donation_requests WHERE id = ?',
+            [donationRequestId]
+        );
+        if (!rows.length) return fail(res, 'Request not found', 404);
+
+        const dr = rows[0];
+        if (dr.status !== STATUS.COMPLETED)
+            return fail(res, 'Feedback can only be submitted after the donation is COMPLETED');
+
+        const parties = [dr.host_id, dr.accepted_by_charity, dr.assigned_volunteer].filter(Boolean);
+        if (req.user.role !== 'admin' && !parties.includes(req.user.id))
+            return fail(res, 'You are not a party to this donation', 403);
+
+        const id = uuidv4();
+        await db.query(
+            `INSERT INTO feedback (id, donation_request_id, reviewer_id, reviewer_role, rating, comment)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [id, donationRequestId, req.user.id, req.user.role, Math.round(rating), comment || null]
+        );
+
+        await logEvent(donationRequestId, req.user.id, req.user.role,
+            `${req.user.role} submitted feedback`,
+            `Rating: ${rating}/5${comment ? ' — ' + comment.slice(0, 80) : ''}`
+        );
+
+        ok(res, { id, message: 'Feedback recorded' });
+    } catch (err) {
+        if (err.code === 'ER_DUP_ENTRY') return fail(res, 'You have already submitted feedback for this donation');
+        console.error('Feedback:', err);
+        fail(res, 'Could not save feedback', 500);
+    }
+});
+
+/**
+ * GET /feedback/:donationRequestId
+ * Returns all feedback for a completed request.
+ */
+app.get('/api/community/feedback/:donationRequestId', authMiddleware, async (req, res) => {
+    try {
+        const [rows] = await db.query(
+            `SELECT f.*, u.name AS reviewer_name
+             FROM feedback f
+             JOIN users u ON f.reviewer_id = u.id
+             WHERE f.donation_request_id = ?
+             ORDER BY f.created_at ASC`,
+            [req.params.donationRequestId]
+        );
+        const avgRating = rows.length
+            ? rows.reduce((s, r) => s + r.rating, 0) / rows.length
+            : null;
+
+        ok(res, { feedback: rows, averageRating: avgRating });
+    } catch (err) {
+        fail(res, 'Could not fetch feedback', 500);
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  G.  VOLUNTEER AVAILABILITY TOGGLE
+//  PATCH /volunteer/availability
+// ═══════════════════════════════════════════════════════════════
+
+app.patch('/api/community/volunteer/availability', authMiddleware, requireRole('volunteer'), async (req, res) => {
+    const { isActive } = req.body;
+    if (typeof isActive !== 'boolean' && isActive !== 0 && isActive !== 1)
+        return fail(res, 'isActive (boolean) is required');
+
+    try {
+        const newStatus = isActive ? 'active' : 'inactive';
+        const [result] = await db.query(
+            'UPDATE volunteers SET status = ? WHERE user_id = ?',
+            [newStatus, req.user.id]
+        );
+        if (!result.affectedRows) return fail(res, 'Volunteer profile not found', 404);
+        ok(res, { status: newStatus, message: `You are now ${newStatus}` });
+    } catch (err) {
+        fail(res, 'Could not update availability', 500);
+    }
+});
+
+/**
+ * GET /volunteer/availability  — read own availability status.
+ */
+app.get('/api/community/volunteer/availability', authMiddleware, requireRole('volunteer'), async (req, res) => {
+    try {
+        const [rows] = await db.query(
+            'SELECT status FROM volunteers WHERE user_id = ?',
+            [req.user.id]
+        );
+        if (!rows.length) return fail(res, 'Volunteer profile not found', 404);
+        ok(res, { status: rows[0].status, isActive: rows[0].status === 'active' });
+    } catch (err) {
+        fail(res, 'Could not fetch availability', 500);
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  H.  ADMIN CSV EXPORT
+//  GET /admin/export/csv?status=COMPLETED&from=2024-01-01&to=2024-12-31
+// ═══════════════════════════════════════════════════════════════
+
+app.get('/api/community/admin/export/csv', authMiddleware, requireRole('admin'), async (req, res) => {
+    const { status, from, to } = req.query;
+
+    try {
+        const filters = ['1=1'];
+        const params  = [];
+
+        if (status) { filters.push('dr.status = ?');             params.push(status); }
+        if (from)   { filters.push('dr.created_at >= ?');        params.push(from);   }
+        if (to)     { filters.push('dr.created_at <= ?');        params.push(to + ' 23:59:59'); }
+
+        const [rows] = await db.query(
+            `SELECT dr.id, dr.status, dr.food_description, dr.quantity,
+                    dr.pickup_address, dr.contact_phone,
+                    dr.is_vegan, dr.is_gluten_free, dr.expiry_time,
+                    dr.preferred_pickup_time, dr.notes,
+                    dr.created_at, dr.updated_at,
+                    uh.name  AS host_name,  uh.email AS host_email,
+                    uc.name  AS charity_name,
+                    uv.name  AS volunteer_name
+             FROM donation_requests dr
+             JOIN  users uh ON dr.host_id = uh.id
+             LEFT JOIN users uc ON dr.accepted_by_charity = uc.id
+             LEFT JOIN users uv ON dr.assigned_volunteer  = uv.id
+             WHERE ${filters.join(' AND ')}
+             ORDER BY dr.created_at DESC`,
+            params
+        );
+
+        // Build CSV manually (no external dep)
+        const cols = [
+            'id','status','food_description','quantity','pickup_address','contact_phone',
+            'is_vegan','is_gluten_free','expiry_time','preferred_pickup_time','notes',
+            'created_at','updated_at','host_name','host_email','charity_name','volunteer_name'
+        ];
+
+        const escapeCSV = (v) => {
+            if (v === null || v === undefined) return '';
+            const s = String(v);
+            return s.includes(',') || s.includes('"') || s.includes('\n')
+                ? `"${s.replace(/"/g, '""')}"`
+                : s;
+        };
+
+        const lines = [cols.join(',')];
+        for (const row of rows) {
+            lines.push(cols.map(c => escapeCSV(row[c])).join(','));
+        }
+
+        const csv      = lines.join('\r\n');
+        const filename = `community_donations_${Date.now()}.csv`;
+
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.send(csv);
+    } catch (err) {
+        console.error('CSV export:', err);
+        fail(res, 'Could not generate CSV', 500);
+    }
+});
 const FRONTEND = path.join(__dirname, '..', 'frontend', 'community-ts');
 console.log('📁 Serving frontend from:', FRONTEND);
 app.use(express.static(FRONTEND));

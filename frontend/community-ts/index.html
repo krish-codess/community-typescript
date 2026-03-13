@@ -10,6 +10,171 @@
     <link rel="stylesheet" href="styles/animations.css" />
     <link rel="stylesheet" href="styles/community-login.css" />
     <link rel="stylesheet" href="styles/enhancements.css" />
+    <link rel="stylesheet" href="styles/phase2.css" />
+
+    <!-- Google Maps JS SDK — replace YOUR_GOOGLE_MAPS_KEY -->
+    <script>
+        function initGoogleMaps() {
+            window._googleMapsReady = true;
+            document.dispatchEvent(new CustomEvent('google-maps-ready'));
+        }
+    </script>
+    <script async defer
+        src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_KEY&libraries=places&callback=initGoogleMaps">
+    </script>
+
+    <!-- Phase 2 inline CSS (dark mode variables + new components) -->
+    <style>
+        /* ── CSS VARIABLES ── */
+        :root {
+            --bg-primary:#ffffff; --bg-secondary:#f9fafb; --bg-card:#ffffff;
+            --text-primary:#111827; --text-secondary:#6b7280; --text-muted:#9ca3af;
+            --border:#e5e7eb; --border-light:#f3f4f6;
+            --shadow:0 1px 3px rgba(0,0,0,.10); --shadow-md:0 4px 16px rgba(0,0,0,.08);
+            --input-bg:#ffffff; --input-border:#d1d5db; --nav-bg:#ffffff;
+        }
+        html.dark-mode {
+            --bg-primary:#0f172a; --bg-secondary:#1e293b; --bg-card:#1e293b;
+            --text-primary:#f1f5f9; --text-secondary:#94a3b8; --text-muted:#64748b;
+            --border:#334155; --border-light:#1e293b;
+            --shadow:0 1px 3px rgba(0,0,0,.40); --shadow-md:0 4px 16px rgba(0,0,0,.30);
+            --input-bg:#0f172a; --input-border:#475569; --nav-bg:#1e293b;
+        }
+        html.dark-mode body { background:var(--bg-primary); color:var(--text-primary); }
+        html.dark-mode .community-nav { background:var(--nav-bg); border-bottom:1px solid var(--border); }
+        html.dark-mode .donation-form-container,
+        html.dark-mode .cl-card,
+        html.dark-mode .profile-identity-card,
+        html.dark-mode .profile-details-card,
+        html.dark-mode .profile-role-info-card,
+        html.dark-mode .profile-stat-card,
+        html.dark-mode .dashboard-card,
+        html.dark-mode .charity-stat-card,
+        html.dark-mode .admin-card { background:var(--bg-card); border-color:var(--border); }
+        html.dark-mode input,html.dark-mode textarea,html.dark-mode select {
+            background:var(--input-bg); border-color:var(--input-border); color:var(--text-primary);
+        }
+        html.dark-mode .page-header h1,
+        html.dark-mode .page-title { color:var(--text-primary); }
+        /* ── DARK TOGGLE BUTTON ── */
+        .dark-mode-toggle {
+            display:flex;align-items:center;justify-content:center;
+            width:36px;height:36px;border-radius:50%;
+            border:1px solid var(--border,#e5e7eb);
+            background:transparent;cursor:pointer;
+            color:var(--text-primary,#111827);font-size:16px;
+            transition:background .2s,border-color .2s;flex-shrink:0;
+        }
+        .dark-mode-toggle:hover { background:var(--border,#e5e7eb); }
+        /* ── DIETARY FILTER BAR ── */
+        .dietary-filter-bar {
+            display:flex;align-items:center;gap:.875rem;padding:.7rem 1rem;
+            background:var(--bg-secondary,#f9fafb);border:1px solid var(--border,#e5e7eb);
+            border-radius:10px;margin-bottom:1rem;flex-wrap:wrap;
+        }
+        .df-label { font-weight:600;font-size:.85rem;color:var(--text-secondary,#6b7280); }
+        .df-check { display:flex;align-items:center;gap:.35rem;font-size:.875rem;cursor:pointer; }
+        .df-check input[type=checkbox] { width:15px;height:15px;accent-color:#22c55e; }
+        .badge-vegan,.badge-gf {
+            display:inline-block;padding:.15rem .5rem;border-radius:20px;font-size:.72rem;font-weight:600;
+        }
+        .badge-vegan { background:#dcfce7;color:#166534; }
+        .badge-gf    { background:#fef3c7;color:#92400e; }
+        html.dark-mode .badge-vegan { background:#14532d;color:#86efac; }
+        html.dark-mode .badge-gf    { background:#78350f;color:#fde68a; }
+        /* ── RECURRING CARDS ── */
+        .recurring-list { display:flex;flex-direction:column;gap:.75rem;margin-top:1rem; }
+        .recurring-card {
+            border-radius:10px;padding:1rem 1.25rem;
+            background:var(--bg-card,#fff);border:1px solid var(--border,#e5e7eb);
+            display:flex;flex-direction:column;gap:.5rem;
+        }
+        .recurring-card.inactive { opacity:.6; }
+        .rc-header { display:flex;justify-content:space-between;align-items:center; }
+        .rc-food   { font-weight:700;font-size:.95rem; }
+        .rc-meta   { font-size:.82rem;color:var(--text-secondary,#6b7280); }
+        .rc-actions { display:flex;gap:.5rem;margin-top:.25rem; }
+        /* ── LIVE TRACKING MAP ── */
+        .tracking-section {
+            margin:1.5rem 0;border-radius:12px;overflow:hidden;
+            border:1px solid var(--border,#e5e7eb);background:var(--bg-card,#fff);
+        }
+        .tracking-header {
+            display:flex;justify-content:space-between;align-items:center;
+            padding:.875rem 1.25rem;border-bottom:1px solid var(--border,#e5e7eb);
+        }
+        .tracking-header h3 { margin:0;font-size:1rem;font-weight:600; }
+        #trackingMapEl { width:100%;height:400px; }
+        .track-meta {
+            display:flex;justify-content:space-between;padding:.625rem 1rem;
+            font-size:.8rem;color:var(--text-secondary,#6b7280);
+            border-top:1px solid var(--border,#e5e7eb);
+        }
+        .map-loading,.map-message {
+            padding:3rem;text-align:center;color:var(--text-secondary,#6b7280);font-size:.9rem;
+        }
+        /* ── AVAILABILITY TOGGLE ── */
+        .vol-header-bar {
+            display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;
+        }
+        .availability-widget {
+            display:flex;align-items:center;gap:.75rem;padding:.5rem .875rem;
+            border:1px solid var(--border,#e5e7eb);border-radius:8px;
+            background:var(--bg-secondary,#f9fafb);font-size:.875rem;
+        }
+        .avail-label { font-weight:600; }
+        .toggle-switch { position:relative;display:inline-block;width:42px;height:22px;cursor:pointer; }
+        .toggle-switch input { opacity:0;width:0;height:0; }
+        .toggle-slider {
+            position:absolute;top:0;left:0;right:0;bottom:0;
+            background:#d1d5db;border-radius:22px;transition:.3s;
+        }
+        .toggle-slider::before {
+            content:'';position:absolute;width:16px;height:16px;
+            left:3px;bottom:3px;background:white;border-radius:50%;transition:.3s;
+        }
+        .toggle-switch input:checked + .toggle-slider { background:#22c55e; }
+        .toggle-switch input:checked + .toggle-slider::before { transform:translateX(20px); }
+        /* ── STAR RATING ── */
+        .feedback-widget { margin-top:.875rem; }
+        .feedback-prompt { font-weight:600;font-size:.875rem;margin:0 0 .5rem; }
+        .star-rating { display:flex;gap:.2rem;margin-bottom:.5rem; }
+        .star {
+            font-size:1.4rem;cursor:pointer;color:#d1d5db;
+            transition:color .12s,transform .1s;line-height:1;
+        }
+        .star:hover,.star.selected { color:#f59e0b; }
+        .star:hover { transform:scale(1.2); }
+        .fb-comment-input {
+            width:100%;padding:.4rem .6rem;border-radius:6px;font-size:.85rem;
+            border:1px solid var(--input-border,#d1d5db);background:var(--input-bg,#fff);
+            color:var(--text-primary,#111827);margin-bottom:.5rem;box-sizing:border-box;
+        }
+        .feedback-submitted { padding:.625rem .875rem;background:var(--bg-secondary,#f9fafb);border-radius:8px;font-size:.875rem; }
+        .feedback-avg { font-size:.78rem;color:var(--text-secondary,#6b7280);margin-top:.4rem; }
+        /* ── ADMIN TOOLS ── */
+        .admin-tools-section { display:flex;flex-direction:column;gap:1.25rem;margin-top:1.5rem; }
+        .admin-tool-card {
+            padding:1.25rem;border-radius:12px;
+            background:var(--bg-card,#fff);border:1px solid var(--border,#e5e7eb);
+        }
+        .admin-tool-card h3 { margin:0 0 .75rem;font-size:1rem; }
+        .admin-tool-card p  { margin:0 0 .875rem;font-size:.875rem;color:var(--text-secondary,#6b7280); }
+        /* ── MISC ── */
+        .btn-sm { padding:.3rem .65rem!important;font-size:.78rem!important; }
+        .btn-danger {
+            background:#ef4444;color:white;border:none;border-radius:6px;
+            padding:.35rem .65rem;font-size:.78rem;cursor:pointer;
+        }
+        .btn-danger:hover { background:#dc2626; }
+        .p2-form-row { display:flex;gap:1rem;flex-wrap:wrap; }
+        .p2-form-row .form-group { flex:1;min-width:140px; }
+        .p2-checks { display:flex;gap:1rem;flex-wrap:wrap;align-items:center;margin:.5rem 0; }
+        .p2-check  { display:flex;align-items:center;gap:.35rem;font-size:.875rem;cursor:pointer; }
+        .p2-check input[type=checkbox] { accent-color:#22c55e; }
+        .section-sep { margin:2rem 0;border:none;border-top:1px solid var(--border,#e5e7eb); }
+        .p2-section-title { font-size:1.1rem;font-weight:700;margin:0 0 1rem;display:flex;align-items:center;gap:.5rem; }
+    </style>
 </head>
 <body>
 
@@ -51,6 +216,7 @@
                 </div>
 
                 <div class="nav-actions">
+                    <button id="darkModeToggle" class="dark-mode-toggle" aria-label="Toggle dark mode" title="Toggle dark mode">🌙</button>
                     <button class="btn-icon notification-btn">
                         <svg class="icon"><use href="#icon-bell"></use></svg>
                       </button>
@@ -1373,12 +1539,34 @@
                                     <span class="checkbox-text">I will use my own containers (reduces waste)</span>
                                 </label>
                             </div>
+                            <!-- Phase 2: Dietary filters -->
+                            <div class="form-group">
+                                <label>Dietary Info <span style="font-weight:400;color:#6b7280;">(tick all that apply)</span></label>
+                                <div class="p2-checks">
+                                    <label class="p2-check">
+                                        <input type="checkbox" id="isVegan" name="isVegan"/>
+                                        🌱 Vegan
+                                    </label>
+                                    <label class="p2-check">
+                                        <input type="checkbox" id="isGlutenFree" name="isGlutenFree"/>
+                                        🌾 Gluten-Free
+                                    </label>
+                                </div>
+                            </div>
+                            <!-- Phase 2: Food expiry time -->
+                            <div class="form-group">
+                                <label for="expiryTime">Food Expiry Date &amp; Time <span style="font-weight:400;color:#6b7280;">(optional)</span></label>
+                                <input type="datetime-local" id="expiryTime" name="expiryTime"/>
+                            </div>
                         </div>
                         <div class="form-section">
                             <h3 class="form-section-title">Pickup Details</h3>
                             <div class="form-group">
                                 <label for="pickupAddress">Pickup Address</label>
-                                <textarea id="pickupAddress" name="pickupAddress" rows="2" placeholder="Enter full pickup address" required></textarea>
+                                <textarea id="pickupAddress" name="pickupAddress" rows="2" placeholder="Start typing — Google will suggest addresses" required></textarea>
+                                <!-- Hidden lat/lng populated by Google Places autocomplete -->
+                                <input type="hidden" id="pickupLat" name="pickupLat"/>
+                                <input type="hidden" id="pickupLng" name="pickupLng"/>
                             </div>
                             <div class="form-row">
                                 <div class="form-group">
@@ -1408,15 +1596,88 @@
                         </div>
                     </form>
                 </div>
+
+                <!-- Phase 2: Live Delivery Tracking Map -->
+                <div class="tracking-section" id="trackingSection" style="display:none;">
+                    <div class="tracking-header">
+                        <h3>📍 Live Delivery Tracking</h3>
+                        <button class="btn-sm btn-outline" onclick="document.getElementById('trackingSection').style.display='none'">✕ Close</button>
+                    </div>
+                    <div id="trackingMapContainer">
+                        <div class="map-loading">Select a donation to begin tracking…</div>
+                    </div>
+                    <div class="track-meta" id="trackMeta" style="display:none;">
+                        <span id="trackVolunteerName">—</span>
+                        <span id="trackLastUpdated">—</span>
+                    </div>
+                    <div id="liveMapEl" style="display:none;width:100%;height:400px;"></div>
+                </div>
+
+                <hr class="section-sep"/>
+
+                <!-- Phase 2: Recurring Donations -->
+                <div style="margin-bottom:2rem;">
+                    <p class="p2-section-title">♻️ Recurring Donations</p>
+                    <p style="font-size:.875rem;color:#6b7280;margin:0 0 1rem;">Schedule a donation template to auto-post on the same day each week.</p>
+                    <form id="createRecurringForm" onsubmit="app.handleCreateRecurring(event)" style="background:var(--bg-secondary,#f9fafb);border:1px solid var(--border,#e5e7eb);border-radius:10px;padding:1.25rem;margin-bottom:1rem;">
+                        <div class="form-group">
+                            <label for="recFoodDesc">Food Description</label>
+                            <input type="text" id="recFoodDesc" name="foodDescription" required placeholder="E.g., Office lunch leftovers"/>
+                        </div>
+                        <div class="p2-form-row">
+                            <div class="form-group">
+                                <label for="recQuantity">Quantity</label>
+                                <input type="text" id="recQuantity" name="quantity" required placeholder="E.g., 20 portions"/>
+                            </div>
+                            <div class="form-group">
+                                <label for="recDay">Repeats Every</label>
+                                <select id="recDay" name="recurrenceDay">
+                                    <option value="1">Monday</option>
+                                    <option value="2">Tuesday</option>
+                                    <option value="3">Wednesday</option>
+                                    <option value="4">Thursday</option>
+                                    <option value="5">Friday</option>
+                                    <option value="6">Saturday</option>
+                                    <option value="7">Sunday</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="recTime">Preferred Time</label>
+                                <input type="time" id="recTime" name="preferredTime"/>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="recAddress">Pickup Address</label>
+                            <input type="text" id="recAddress" name="pickupAddress" required placeholder="Full address"/>
+                        </div>
+                        <div class="form-group">
+                            <label for="recPhone">Contact Phone</label>
+                            <input type="tel" id="recPhone" name="contactPhone" placeholder="+91 XXXXXXXXXX"/>
+                        </div>
+                        <div class="p2-checks">
+                            <label class="p2-check"><input type="checkbox" name="isVegan"/> 🌱 Vegan</label>
+                            <label class="p2-check"><input type="checkbox" name="isGlutenFree"/> 🌾 Gluten-Free</label>
+                        </div>
+                        <button type="submit" class="btn-primary" style="margin-top:.75rem;">Schedule Recurring Donation</button>
+                    </form>
+                    <div id="recurringContainer" class="recurring-list"></div>
+                </div>
+
             </div>
         </section>
 
         <!-- Volunteer Page -->
         <section class="page" id="volunteerPage">
             <div class="container">
-                <div class="page-header">
-                    <h1 class="page-title">Volunteer Portal</h1>
-                    <p class="page-subtitle">Available pickup requests near you</p>
+                <div class="vol-header-bar">
+                    <div class="page-header" style="margin:0;padding:0;">
+                        <h1 class="page-title">Volunteer Portal</h1>
+                        <p class="page-subtitle">Available pickup requests near you</p>
+                    </div>
+                    <!-- Phase 2: Availability toggle -->
+                    <div id="volunteerAvailabilityToggle">
+                        <!-- Injected by loadVolunteerAvailabilityToggle() -->
+                    </div>
                 </div>
                 <div class="volunteer-controls">
                     <div class="filter-group">
@@ -1442,6 +1703,19 @@
                 <div class="page-header">
                     <h1 class="page-title">Available Donations</h1>
                     <p class="page-subtitle">Browse and request surplus food for your organization</p>
+                </div>
+                <!-- Phase 2: Dietary filter bar -->
+                <div class="dietary-filter-bar" id="dietaryFilters">
+                    <span class="df-label">🔍 Filters:</span>
+                    <label class="df-check">
+                        <input type="checkbox" id="filterVegan" onchange="app.loadFilteredAvailableRequests()"/>
+                        🌱 Vegan only
+                    </label>
+                    <label class="df-check">
+                        <input type="checkbox" id="filterGlutenFree" onchange="app.loadFilteredAvailableRequests()"/>
+                        🌾 Gluten-Free only
+                    </label>
+                    <button class="btn-outline btn-sm" onclick="app.loadFilteredAvailableRequests()">Apply Filters</button>
                 </div>
                 <div class="charity-controls">
                     <div class="filter-group">
@@ -1592,6 +1866,59 @@
                         <div class="leaderboard" id="leaderboard"></div>
                     </div>
                 </div>
+
+                <!-- Phase 2: Admin Tools (visible to admin only) -->
+                <div class="admin-tools-section" data-role-visible="admin">
+                    <p class="p2-section-title" style="margin-top:1.5rem;">🛠️ Admin Tools</p>
+
+                    <!-- CSV Export -->
+                    <div class="admin-tool-card">
+                        <h3>📥 Export Donations to CSV</h3>
+                        <p>Download all donation request data as a spreadsheet. Filter by status or date range.</p>
+                        <div class="p2-form-row" style="margin-bottom:.875rem;">
+                            <div class="form-group" style="margin:0;">
+                                <label for="csvStatus" style="font-size:.8rem;">Status</label>
+                                <select id="csvStatus" style="padding:.3rem .5rem;font-size:.85rem;">
+                                    <option value="">All Statuses</option>
+                                    <option value="COMPLETED">Completed</option>
+                                    <option value="REQUESTED">Requested</option>
+                                    <option value="CANCELLED">Cancelled</option>
+                                    <option value="PICKUP_IN_PROGRESS">In Progress</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="margin:0;">
+                                <label for="csvFrom" style="font-size:.8rem;">From Date</label>
+                                <input type="date" id="csvFrom" style="padding:.3rem .5rem;font-size:.85rem;"/>
+                            </div>
+                            <div class="form-group" style="margin:0;">
+                                <label for="csvTo" style="font-size:.8rem;">To Date</label>
+                                <input type="date" id="csvTo" style="padding:.3rem .5rem;font-size:.85rem;"/>
+                            </div>
+                        </div>
+                        <button class="btn-primary" onclick="app.downloadCSV()">⬇️ Download CSV</button>
+                    </div>
+
+                    <!-- Recurring Trigger -->
+                    <div class="admin-tool-card">
+                        <h3>♻️ Trigger Recurring Donations</h3>
+                        <p>Manually post today's scheduled recurring donations. In production this runs automatically via a daily cron job.</p>
+                        <button class="btn-outline" onclick="app.adminTriggerRecurring()">▶ Run Recurring Job Now</button>
+                    </div>
+
+                    <!-- Stale Requests -->
+                    <div class="admin-tool-card">
+                        <h3>⏰ Stale Request Monitor</h3>
+                        <p>View requests stuck in <em>Accepted by Charity</em> for longer than the threshold.</p>
+                        <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.875rem;">
+                            <label style="font-size:.875rem;">Flag requests older than</label>
+                            <input type="number" id="staleHours" value="2" min="1" style="width:60px;padding:.3rem .5rem;font-size:.85rem;border:1px solid var(--input-border,#d1d5db);border-radius:6px;"/>
+                            <label style="font-size:.875rem;">hours</label>
+                        </div>
+                        <button class="btn-outline" onclick="app.loadStaleRequests(parseInt(document.getElementById('staleHours').value))">Check Stale Requests</button>
+                        <div id="staleRequestsContainer" style="margin-top:1rem;"></div>
+                    </div>
+                </div>
+
             </div>
         </section>
 

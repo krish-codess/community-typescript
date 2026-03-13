@@ -242,4 +242,105 @@ class CommunityAPI {
     async getStaleRequests(hours = 2) {
         return this.request('GET', `/admin/stale-requests?hours=${hours}`);
     }
+
+    // ── PHASE 2 ADDITIONS ────────────────────
+
+    // ── LIVE TRACKING ────────────────────────
+
+    /** B. Get volunteer live position + pickup/charity coords for the tracking map. */
+    async getTrackingData(donationRequestId) {
+        return this.request('GET', `/tracking/${donationRequestId}`);
+    }
+
+    // ── RECURRING DONATIONS ──────────────────
+
+    /** C. Create a recurring donation template. */
+    async createRecurringDonation({ foodDescription, quantity, pickupAddress,
+                                    contactPhone, notes, recurrenceDay,
+                                    preferredTime, isVegan, isGlutenFree }) {
+        return this.request('POST', '/host/recurring', {
+            foodDescription, quantity, pickupAddress, contactPhone,
+            notes, recurrenceDay, preferredTime, isVegan, isGlutenFree
+        });
+    }
+
+    /** C. List my recurring donation templates. */
+    async getMyRecurringDonations() {
+        return this.request('GET', '/host/recurring');
+    }
+
+    /** C. Toggle or update a recurring template. */
+    async updateRecurringDonation(id, { isActive }) {
+        return this.request('PATCH', `/host/recurring/${id}`, { isActive });
+    }
+
+    /** C. Delete a recurring template. */
+    async deleteRecurringDonation(id) {
+        return this.request('DELETE', `/host/recurring/${id}`);
+    }
+
+    // ── DIETARY FILTERS ──────────────────────
+
+    /**
+     * D. Fetch available requests with optional dietary filters.
+     * @param {{ vegan?: boolean, glutenFree?: boolean }} filters
+     */
+    async getAvailableRequestsFiltered({ vegan = false, glutenFree = false } = {}) {
+        const qs = new URLSearchParams();
+        if (vegan)      qs.set('vegan', '1');
+        if (glutenFree) qs.set('glutenFree', '1');
+        const query = qs.toString() ? `?${qs}` : '';
+        return this.request('GET', `/charity/available-v2${query}`);
+    }
+
+    // ── FEEDBACK ────────────────────────────
+
+    /**
+     * F. Submit star-rating feedback after COMPLETED.
+     * @param {string} donationRequestId
+     * @param {number} rating  1–5
+     * @param {string} [comment]
+     */
+    async submitFeedback(donationRequestId, rating, comment = null) {
+        return this.request('POST', `/feedback/${donationRequestId}`, { rating, comment });
+    }
+
+    /** F. Retrieve all feedback for a request. */
+    async getFeedback(donationRequestId) {
+        return this.request('GET', `/feedback/${donationRequestId}`);
+    }
+
+    // ── VOLUNTEER AVAILABILITY ───────────────
+
+    /** G. Toggle volunteer active/inactive. */
+    async setVolunteerAvailability(isActive) {
+        return this.request('PATCH', '/volunteer/availability', { isActive });
+    }
+
+    /** G. Get own availability status. */
+    async getVolunteerAvailability() {
+        return this.request('GET', '/volunteer/availability');
+    }
+
+    // ── ADMIN ───────────────────────────────
+
+    /**
+     * H. Download CSV export.
+     * Returns the full download URL (use as href, not fetch).
+     * @param {{ status?: string, from?: string, to?: string }} opts
+     */
+    getCSVExportUrl({ status = '', from = '', to = '' } = {}) {
+        const qs = new URLSearchParams();
+        if (status) qs.set('status', status);
+        if (from)   qs.set('from', from);
+        if (to)     qs.set('to', to);
+        const token = localStorage.getItem('community_token');
+        if (token)  qs.set('_token', token); // Bearer workaround for direct download
+        return `${this.baseURL}/admin/export/csv?${qs}`;
+    }
+
+    /** H. Trigger auto-posting of today's recurring donations (admin cron). */
+    async triggerRecurring() {
+        return this.request('POST', '/admin/recurring/trigger');
+    }
 }

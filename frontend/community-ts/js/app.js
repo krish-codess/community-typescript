@@ -44,6 +44,8 @@ class CommunityApp {
         this.setupLoginUI();
         this.initSocket();          // Feature 8
         this.navigateTo('home');
+        this.initDarkMode();
+        this.setupDarkModeToggle();
     }
 
     // ─────────────────────────────────────────
@@ -1214,6 +1216,543 @@ class CommunityApp {
             setTimeout(() => toast.remove(), 300);
         }, 4000);
     }
+    /* ====================================================================
+    COMMUNITY — Phase 2 App Controller Additions
+    Merge these methods into CommunityApp in app.js.
+ 
+    Phase 2 features:
+    A.  Address Autocomplete   (Google Places on Donate form)
+    B.  Host Live Tracking Map (Google Maps tracking view)
+    C.  Volunteer Routing      (Google Maps directions button)
+    D.  Dark Mode Toggle       (persisted in localStorage)
+    E.  Recurring Donations    (UI for create / list / toggle)
+    F.  Dietary Filters        (vegan / gluten-free filter UI)
+    G.  Ratings Widget         (post-COMPLETED star input)
+    H.  Volunteer Availability Toggle
+    I.  Admin CSV Export button
+    ==================================================================== */
+ 
+ /* ------------------------------------------------------------------
+    HOW TO INTEGRATE
+    ──────────────────────────────────────────────────────────────────
+    1.  In index.html, add before </body>:
+ 
+        <!-- Google Maps JS API (replace YOUR_GOOGLE_MAPS_KEY) -->
+        <script async defer
+          src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_KEY&libraries=places&callback=initGoogleMaps">
+        </script>
+        <script>
+          function initGoogleMaps() {
+            window._googleMapsReady = true;
+            document.dispatchEvent(new Event('google-maps-ready'));
+          }
+        </script>
+ 
+    2.  Copy every method below into the CommunityApp class body in app.js.
+    3.  In CommunityApp.init(), add:
+          this.initDarkMode();
+          this.setupDarkModeToggle();
+    4.  In navigateTo(), add:
+          if (page === 'recurring')    this.loadRecurringDonations();
+          if (page === 'track')        this.initTrackingMap();
+    ------------------------------------------------------------------ */
+ 
+ // ═══════════════════════════════════════════════════════════════
+ //  D.  DARK MODE
+ // ═══════════════════════════════════════════════════════════════
+ 
+ initDarkMode() {
+     const saved = localStorage.getItem('community_dark_mode');
+     if (saved === 'true') {
+         document.documentElement.classList.add('dark-mode');
+     }
+ }
+ 
+ setupDarkModeToggle() {
+     // The toggle button should have id="darkModeToggle" in index.html
+     const btn = document.getElementById('darkModeToggle');
+     if (!btn) return;
+ 
+     const update = () => {
+         const isDark = document.documentElement.classList.contains('dark-mode');
+         btn.setAttribute('aria-pressed', String(isDark));
+         btn.title = isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode';
+         btn.innerHTML = isDark
+             ? `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="5"/>
+                  <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+                  <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+                  <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+                  <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                </svg>`
+             : `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                </svg>`;
+     };
+ 
+     btn.addEventListener('click', () => {
+         document.documentElement.classList.toggle('dark-mode');
+         const isDark = document.documentElement.classList.contains('dark-mode');
+         localStorage.setItem('community_dark_mode', String(isDark));
+         update();
+     });
+ 
+     update();
+ }
+ 
+ // ═══════════════════════════════════════════════════════════════
+ //  A.  GOOGLE PLACES ADDRESS AUTOCOMPLETE
+ // ═══════════════════════════════════════════════════════════════
+ 
+ initPlacesAutocomplete() {
+     const input = document.getElementById('pickupAddress');
+     if (!input) return;
+ 
+     const initAC = () => {
+         if (!window.google?.maps?.places) return;
+         const ac = new google.maps.places.Autocomplete(input, {
+             types: ['geocode'],
+             componentRestrictions: { country: 'in' }   // adjust to your country
+         });
+ 
+         ac.addListener('place_changed', () => {
+             const place = ac.getPlace();
+             if (!place.geometry) return;
+ 
+             // Populate hidden lat/lng fields used by createDonation()
+             const latInput = document.getElementById('pickupLat');
+             const lngInput = document.getElementById('pickupLng');
+             if (latInput) latInput.value = place.geometry.location.lat();
+             if (lngInput) lngInput.value = place.geometry.location.lng();
+         });
+     };
+ 
+     if (window._googleMapsReady) {
+         initAC();
+     } else {
+         document.addEventListener('google-maps-ready', initAC, { once: true });
+     }
+ }
+ 
+ // ═══════════════════════════════════════════════════════════════
+ //  B.  HOST LIVE TRACKING MAP
+ // ═══════════════════════════════════════════════════════════════
+ 
+ /**
+  * Call from navigateTo('track') or when a host clicks "Track Delivery".
+  * @param {string} donationRequestId
+  */
+ async openTrackingView(donationRequestId) {
+     const container = document.getElementById('trackingMapContainer');
+     if (!container) { this.showToast('Tracking panel not found in HTML', 'error'); return; }
+ 
+     container.innerHTML = '<p class="map-loading">Loading tracking data…</p>';
+ 
+     try {
+         const res  = await this.api.getTrackingData(donationRequestId);
+         const data = res.data;
+ 
+         if (!data.trackable) {
+             container.innerHTML = `
+               <div class="track-info">
+                 <p>Live tracking is only active when the volunteer is <strong>En Route</strong> or has <strong>Collected Food</strong>.</p>
+                 <p>Current status: <strong>${STATUS_LABELS[data.status] || data.status}</strong></p>
+               </div>`;
+             return;
+         }
+ 
+         container.innerHTML = `
+           <div id="liveMapEl" style="width:100%;height:400px;border-radius:12px;"></div>
+           <div class="track-meta">
+             <span>🚴 <strong>${data.volunteer.name || 'Volunteer'}</strong></span>
+             <span>Last updated: ${data.volunteer.lastUpdated
+                 ? new Date(data.volunteer.lastUpdated).toLocaleTimeString()
+                 : 'awaiting…'}</span>
+           </div>`;
+ 
+         const initMap = () => {
+             if (!window.google?.maps) return;
+ 
+             const pickupLatLng  = data.pickup.lat && data.pickup.lng
+                 ? { lat: data.pickup.lat, lng: data.pickup.lng }
+                 : null;
+             const volunteerPos  = data.volunteer.lat && data.volunteer.lng
+                 ? { lat: data.volunteer.lat, lng: data.volunteer.lng }
+                 : pickupLatLng;
+ 
+             const center = volunteerPos || { lat: 13.0827, lng: 80.2707 }; // Chennai fallback
+ 
+             const map = new google.maps.Map(document.getElementById('liveMapEl'), {
+                 center, zoom: 14,
+                 mapTypeControl: false, streetViewControl: false
+             });
+ 
+             // Volunteer marker
+             const volunteerMarker = new google.maps.Marker({
+                 position: volunteerPos || center,
+                 map,
+                 title:  `Volunteer: ${data.volunteer.name}`,
+                 icon: {
+                     url:        'https://maps.google.com/mapfiles/ms/icons/blue-dot.png',
+                     scaledSize: new google.maps.Size(36, 36)
+                 }
+             });
+ 
+             // Pickup marker
+             if (pickupLatLng) {
+                 new google.maps.Marker({
+                     position: pickupLatLng,
+                     map,
+                     title: 'Pickup: ' + data.pickup.address,
+                     icon: {
+                         url:        'https://maps.google.com/mapfiles/ms/icons/orange-dot.png',
+                         scaledSize: new google.maps.Size(32, 32)
+                     }
+                 });
+             }
+ 
+             // Subscribe to real-time updates via socket
+             if (this._socket) {
+                 const token = localStorage.getItem('community_token');
+                 this._socket.emit('track_request', { token, donationRequestId });
+ 
+                 this._socket.on('location_update', ({ lat, lng, timestamp }) => {
+                     const pos = { lat, lng };
+                     volunteerMarker.setPosition(pos);
+                     map.panTo(pos);
+                     const meta = container.querySelector('.track-meta span:last-child');
+                     if (meta) meta.textContent = 'Last updated: ' + new Date(timestamp).toLocaleTimeString();
+                 });
+             }
+         };
+ 
+         if (window._googleMapsReady) {
+             initMap();
+         } else {
+             document.addEventListener('google-maps-ready', initMap, { once: true });
+         }
+     } catch (err) {
+         container.innerHTML = `<p class="error-msg">Could not load tracking: ${err.message}</p>`;
+     }
+ }
+ 
+ // ═══════════════════════════════════════════════════════════════
+ //  C.  VOLUNTEER ROUTING — "Get Directions" button
+ // ═══════════════════════════════════════════════════════════════
+ 
+ /**
+  * Opens Google Maps with a route from the volunteer's current GPS
+  * → pickup address → charity address.
+  * Call when volunteer clicks "Get Directions" on a delivery card.
+  * @param {{ pickupAddress: string, charityAddress?: string }} delivery
+  */
+ openDirections(delivery) {
+     const getPos = () => new Promise((resolve, reject) =>
+         navigator.geolocation
+             ? navigator.geolocation.getCurrentPosition(
+                 p => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
+                 () => resolve(null)
+               )
+             : resolve(null)
+     );
+ 
+     getPos().then(pos => {
+         const origin      = pos
+             ? `${pos.lat},${pos.lng}`
+             : encodeURIComponent('My Location');
+         const waypoint    = encodeURIComponent(delivery.pickupAddress);
+         const destination = encodeURIComponent(delivery.charityAddress || delivery.pickupAddress);
+ 
+         const url = `https://www.google.com/maps/dir/?api=1`
+                   + `&origin=${origin}`
+                   + `&waypoints=${waypoint}`
+                   + `&destination=${destination}`
+                   + `&travelmode=driving`;
+ 
+         window.open(url, '_blank');
+     });
+ }
+ 
+ // ═══════════════════════════════════════════════════════════════
+ //  E.  RECURRING DONATIONS
+ // ═══════════════════════════════════════════════════════════════
+ 
+ async loadRecurringDonations() {
+     const container = document.getElementById('recurringContainer');
+     if (!container) return;
+     container.innerHTML = '<p class="loading-msg">Loading recurring donations…</p>';
+ 
+     try {
+         const res  = await this.api.getMyRecurringDonations();
+         const list = res.data.templates || [];
+ 
+         if (!list.length) {
+             container.innerHTML = '<p class="empty-msg">No recurring donations yet.</p>';
+             return;
+         }
+ 
+         const days = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+         container.innerHTML = list.map(t => `
+           <div class="recurring-card ${t.is_active ? 'active' : 'inactive'}">
+             <div class="rc-header">
+               <span class="rc-food">${t.food_description}</span>
+               <span class="rc-badge">${t.is_active ? '🟢 Active' : '⚫ Paused'}</span>
+             </div>
+             <div class="rc-meta">
+               Every <strong>${days[t.recurrence_day] || t.recurrence_day}</strong>
+               ${t.preferred_time ? 'at ' + t.preferred_time : ''} ·
+               ${t.quantity} · ${t.pickup_address}
+               ${t.is_vegan       ? '🌱 Vegan' : ''}
+               ${t.is_gluten_free ? '🌾 GF'    : ''}
+             </div>
+             <div class="rc-actions">
+               <button class="btn-sm btn-outline" onclick="app.toggleRecurring('${t.id}', ${!t.is_active})">
+                 ${t.is_active ? 'Pause' : 'Resume'}
+               </button>
+               <button class="btn-sm btn-danger" onclick="app.deleteRecurring('${t.id}')">Delete</button>
+             </div>
+           </div>`).join('');
+     } catch (err) {
+         container.innerHTML = `<p class="error-msg">Error: ${err.message}</p>`;
+     }
+ }
+ 
+ async toggleRecurring(id, isActive) {
+     try {
+         await this.api.updateRecurringDonation(id, { isActive });
+         this.showToast(`Recurring donation ${isActive ? 'resumed' : 'paused'}.`, 'success');
+         this.loadRecurringDonations();
+     } catch (err) {
+         this.showToast('Could not update: ' + err.message, 'error');
+     }
+ }
+ 
+ async deleteRecurring(id) {
+     if (!confirm('Delete this recurring donation template?')) return;
+     try {
+         await this.api.deleteRecurringDonation(id);
+         this.showToast('Recurring donation deleted.', 'success');
+         this.loadRecurringDonations();
+     } catch (err) {
+         this.showToast('Could not delete: ' + err.message, 'error');
+     }
+ }
+ 
+ async handleCreateRecurring(e) {
+     e.preventDefault();
+     const f = e.target;
+     try {
+         await this.api.createRecurringDonation({
+             foodDescription: f.foodDescription.value,
+             quantity:        f.quantity.value,
+             pickupAddress:   f.pickupAddress.value,
+             contactPhone:    f.contactPhone?.value || null,
+             notes:           f.notes?.value || null,
+             recurrenceDay:   parseInt(f.recurrenceDay.value),
+             preferredTime:   f.preferredTime?.value || null,
+             isVegan:         f.isVegan?.checked || false,
+             isGlutenFree:    f.isGlutenFree?.checked || false
+         });
+         this.showToast('Recurring donation scheduled! ✅', 'success');
+         f.reset();
+         this.loadRecurringDonations();
+     } catch (err) {
+         this.showToast('Error: ' + err.message, 'error');
+     }
+ }
+ 
+ // ═══════════════════════════════════════════════════════════════
+ //  F.  DIETARY FILTERS
+ // ═══════════════════════════════════════════════════════════════
+ 
+ /**
+  * Call this instead of (or alongside) loadAvailableRequests() for charities.
+  * Reads filter checkboxes #filterVegan and #filterGlutenFree from the DOM.
+  */
+ async loadFilteredAvailableRequests() {
+     const container    = document.getElementById('availableRequestsContainer');
+     if (!container) return;
+     container.innerHTML = '<p class="loading-msg">Loading…</p>';
+ 
+     const vegan      = document.getElementById('filterVegan')?.checked      || false;
+     const glutenFree = document.getElementById('filterGlutenFree')?.checked || false;
+ 
+     try {
+         const res      = await this.api.getAvailableRequestsFiltered({ vegan, glutenFree });
+         const requests = res.data.requests || [];
+ 
+         if (!requests.length) {
+             container.innerHTML = '<p class="empty-msg">No requests match your filters.</p>';
+             return;
+         }
+ 
+         container.innerHTML = requests.map(r => this.renderCharityAvailableCard(r)).join('');
+     } catch (err) {
+         container.innerHTML = `<p class="error-msg">Error: ${err.message}</p>`;
+     }
+ }
+ 
+ setupDietaryFilterListeners() {
+     ['filterVegan', 'filterGlutenFree'].forEach(id => {
+         document.getElementById(id)?.addEventListener('change', () => {
+             this.loadFilteredAvailableRequests();
+         });
+     });
+ }
+ 
+ // Helper — renders a single available-request card (extend your existing renderCharityCard)
+ renderCharityAvailableCard(r) {
+     return `
+       <div class="request-card">
+         <div class="rc-food-title">${r.food_description}</div>
+         <div class="rc-badges">
+           ${r.is_vegan       ? '<span class="badge-vegan">🌱 Vegan</span>'        : ''}
+           ${r.is_gluten_free ? '<span class="badge-gf">🌾 Gluten-Free</span>'     : ''}
+           <span class="badge-qty">${r.quantity}</span>
+         </div>
+         <div class="rc-host">By: ${r.host_name} · ${r.pickup_address}</div>
+         <button class="btn-primary" onclick="app.charityAcceptRequest('${r.id}')">Accept</button>
+       </div>`;
+ }
+ 
+ // ═══════════════════════════════════════════════════════════════
+ //  G.  RATINGS / FEEDBACK WIDGET
+ // ═══════════════════════════════════════════════════════════════
+ 
+ /**
+  * Inject a star-rating widget into a completed delivery card.
+  * @param {string} donationRequestId
+  * @param {string} containerId  — DOM id of the widget mount point
+  */
+ async loadFeedbackWidget(donationRequestId, containerId) {
+     const el = document.getElementById(containerId);
+     if (!el) return;
+ 
+     try {
+         const res      = await this.api.getFeedback(donationRequestId);
+         const { feedback, averageRating } = res.data;
+ 
+         // Check if current user already rated
+         const myRating = feedback.find(f => f.reviewer_id === this.user?.id);
+ 
+         if (myRating) {
+             el.innerHTML = `
+               <div class="feedback-submitted">
+                 <p>Your rating: ${'★'.repeat(myRating.rating)}${'☆'.repeat(5 - myRating.rating)}</p>
+                 ${myRating.comment ? `<p class="feedback-comment">"${myRating.comment}"</p>` : ''}
+               </div>`;
+         } else {
+             el.innerHTML = `
+               <div class="feedback-form" id="feedback-${donationRequestId}">
+                 <p class="feedback-prompt">Rate this delivery:</p>
+                 <div class="star-rating" data-id="${donationRequestId}">
+                   ${[1,2,3,4,5].map(n =>
+                     `<span class="star" data-value="${n}" onclick="app.setStarRating('${donationRequestId}', ${n})">☆</span>`
+                   ).join('')}
+                 </div>
+                 <input type="text" id="fb-comment-${donationRequestId}"
+                        placeholder="Leave a comment (optional)" class="feedback-comment-input"/>
+                 <button class="btn-primary btn-sm"
+                         onclick="app.submitFeedback('${donationRequestId}', '${containerId}')">
+                   Submit Rating
+                 </button>
+               </div>`;
+         }
+ 
+         // Show aggregate if we have ratings
+         if (averageRating !== null) {
+             const avgEl = document.createElement('p');
+             avgEl.className = 'feedback-avg';
+             avgEl.textContent = `Avg rating: ${averageRating.toFixed(1)} ★ (${feedback.length} review${feedback.length !== 1 ? 's' : ''})`;
+             el.appendChild(avgEl);
+         }
+     } catch (err) {
+         el.innerHTML = `<p class="error-msg">Could not load feedback</p>`;
+     }
+ }
+ 
+ setStarRating(donationRequestId, value) {
+     const container = document.querySelector(`.star-rating[data-id="${donationRequestId}"]`);
+     if (!container) return;
+     container.dataset.selected = value;
+     container.querySelectorAll('.star').forEach((star, i) => {
+         star.textContent = i < value ? '★' : '☆';
+         star.classList.toggle('selected', i < value);
+     });
+ }
+ 
+ async submitFeedback(donationRequestId, containerId) {
+     const container = document.querySelector(`.star-rating[data-id="${donationRequestId}"]`);
+     const rating    = parseInt(container?.dataset.selected || '0');
+     const comment   = document.getElementById(`fb-comment-${donationRequestId}`)?.value || null;
+ 
+     if (!rating) { this.showToast('Please select a star rating.', 'error'); return; }
+ 
+     try {
+         await this.api.submitFeedback(donationRequestId, rating, comment);
+         this.showToast('Thank you for your feedback! ⭐', 'success');
+         this.loadFeedbackWidget(donationRequestId, containerId); // Refresh to show submitted state
+     } catch (err) {
+         this.showToast('Error: ' + err.message, 'error');
+     }
+ }
+ 
+ // ═══════════════════════════════════════════════════════════════
+ //  H.  VOLUNTEER AVAILABILITY TOGGLE
+ // ═══════════════════════════════════════════════════════════════
+ 
+ async loadVolunteerAvailabilityToggle() {
+     const el = document.getElementById('volunteerAvailabilityToggle');
+     if (!el) return;
+ 
+     try {
+         const res    = await this.api.getVolunteerAvailability();
+         const active = res.data.isActive;
+ 
+         el.innerHTML = `
+           <div class="availability-toggle">
+             <span class="avail-label">${active ? '🟢 Available' : '🔴 Off Duty'}</span>
+             <label class="toggle-switch" title="${active ? 'Go off duty' : 'Go available'}">
+               <input type="checkbox" id="availToggleCheck" ${active ? 'checked' : ''}
+                      onchange="app.toggleAvailability(this.checked)"/>
+               <span class="toggle-slider"></span>
+             </label>
+           </div>`;
+     } catch {
+         // Silently skip if volunteer profile not yet created
+     }
+ }
+ 
+ async toggleAvailability(isActive) {
+     try {
+         const res = await this.api.setVolunteerAvailability(isActive);
+         this.showToast(res.data.message, 'success');
+         this.loadVolunteerAvailabilityToggle();
+     } catch (err) {
+         this.showToast('Could not update availability: ' + err.message, 'error');
+     }
+ }
+ 
+ // ═══════════════════════════════════════════════════════════════
+ //  I.  ADMIN CSV EXPORT
+ // ═══════════════════════════════════════════════════════════════
+ 
+ downloadCSV() {
+     const status = document.getElementById('csvStatus')?.value  || '';
+     const from   = document.getElementById('csvFrom')?.value    || '';
+     const to     = document.getElementById('csvTo')?.value      || '';
+ 
+     const url = this.api.getCSVExportUrl({ status, from, to });
+     const a   = document.createElement('a');
+     a.href     = url;
+     a.download = `community_export_${Date.now()}.csv`;
+     // Pass JWT as a query param since <a> downloads can't send headers.
+     // Server must accept _token query param as fallback auth.
+     document.body.appendChild(a);
+     a.click();
+     a.remove();
+     this.showToast('CSV download started…', 'info');
+ }
 }
 
 // ─────────────────────────────────────────
