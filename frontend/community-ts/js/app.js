@@ -1,6 +1,23 @@
 /* ========================================
-   COMMUNITY - Main Application Controller
-   Refactored for the new donation lifecycle
+   COMMUNITY — Main Application Controller
+   Feature Pack v2
+
+   New / changed sections:
+   ─ initSocket()                  Feature 8  (real-time updates)
+   ─ handleDonationSubmit()        Feature 3  (expiryTime, pickupLat/Lng)
+   ─ loadAvailablePickups()        Feature 2  (nearby badge + distance)
+   ─ volunteerDeclinePickup()      Feature 6  (reason prompt)
+   ─ renderVolunteerDeliveryCard() Feature 1+3 (photo upload, countdown)
+   ─ volunteerUpdateStatus()       Feature 1  (photo url)
+   ─ renderCharityRequestCard()    Feature 1  (photo upload on confirm)
+   ─ charityConfirmReceipt()       Feature 1  (sends photoUrl)
+   ─ renderOrderCard()             Feature 1  (shows proof images in timeline)
+   ─ loadLeaderboard()             Feature 5  (leaderboard)
+   ─ renderLeaderboard()           Feature 5
+   ─ loadWishlistForHosts()        Feature 7  (host sees charity needs)
+   ─ loadCharityWishlist()         Feature 7  (charity manages wishlist)
+   ─ loadStaleRequests()           Feature 10 (admin panel)
+   ─ startExpiryTimers()           Feature 3  (countdown timers)
    ======================================== */
 
 class CommunityApp {
@@ -9,6 +26,8 @@ class CommunityApp {
         this.currentPage   = 'home';
         this.notifications = [];
         this.api           = new CommunityAPI();
+        this._expiryTimers = new Map();   // Feature 3: keyed by donation ID
+        this._socket       = null;        // Feature 8
         this.init();
     }
 
@@ -23,7 +42,40 @@ class CommunityApp {
         this.setupIntersectionObserver();
         this.setupEventListeners();
         this.setupLoginUI();
+        this.initSocket();          // Feature 8
         this.navigateTo('home');
+    }
+
+    // ─────────────────────────────────────────
+    // FEATURE 8 · REAL-TIME SOCKET.IO
+    // ─────────────────────────────────────────
+
+    initSocket() {
+        if (typeof io === 'undefined') {
+            console.warn('socket.io not loaded — real-time updates disabled');
+            return;
+        }
+        this._socket = io();
+
+        this._socket.on('connect', () => {
+            console.log('🔌 Real-time updates connected');
+        });
+
+        /**
+         * Server emits { id, status, actor } whenever any request changes.
+         * We refresh whichever dashboard section is currently visible.
+         */
+        this._socket.on('request_updated', ({ id, status, actor }) => {
+            console.log(`🔔 request_updated: ${id} → ${status} (by ${actor})`);
+            this.showToast(`A donation request was updated to: ${STATUS_LABELS[status] || status}`, 'info');
+
+            // Silently refresh the current page's data feed
+            if (this.currentPage === 'volunteer') this.loadVolunteerDashboard();
+            if (this.currentPage === 'charity')   this.loadCharityDashboard();
+            if (this.currentPage === 'donate')    this.loadHostDashboard();
+            if (this.currentPage === 'orders')    this.loadMyOrders();
+            if (this.currentPage === 'dashboard') this.loadDashboardData();
+        });
     }
 
     // ─────────────────────────────────────────
@@ -100,7 +152,7 @@ class CommunityApp {
     }
 
     navigateTo(page) {
-        const role = this.user?.role;
+        const role        = this.user?.role;
         const guestAllowed = ['home', 'login'];
 
         if (!role && !guestAllowed.includes(page)) {
@@ -110,12 +162,15 @@ class CommunityApp {
         }
 
         const accessControl = {
-            donate:    ['host'],
-            volunteer: ['volunteer'],
-            charity:   ['charity'],
-            dashboard: ['admin'],
-            orders:    ['host', 'volunteer', 'charity', 'admin'],
-            profile:   ['host', 'volunteer', 'charity', 'admin']
+            donate:     ['host'],
+            volunteer:  ['volunteer'],
+            charity:    ['charity'],
+            dashboard:  ['admin'],
+            orders:     ['host', 'volunteer', 'charity', 'admin'],
+            profile:    ['host', 'volunteer', 'charity', 'admin'],
+            leaderboard: ['host', 'volunteer', 'charity', 'admin'],
+            wishlist:   ['host', 'charity', 'admin'],
+            stale:      ['admin']
         };
 
         if (accessControl[page] && role && !accessControl[page].includes(role)) {
@@ -132,22 +187,23 @@ class CommunityApp {
             l.classList.toggle('active', l.dataset.page === page));
         this.currentPage = page;
 
-        // Page-specific data loading
-        if (page === 'donate')    this.loadHostDashboard();
-        if (page === 'volunteer') this.loadVolunteerDashboard();
+        if (page === 'donate')       this.loadHostDashboard();
+        if (page === 'volunteer')    this.loadVolunteerDashboard();
         if (page === 'charity') {
-            // The charity section spans two <section> elements in the HTML:
-            // #charityDashboard (available requests to browse) and
-            // #charityPage (accepted requests / incoming deliveries).
-            // Activate both so all content is visible.
             const dashEl = document.getElementById('charityDashboard');
             if (dashEl) dashEl.classList.add('active');
             this.loadCharityDashboard();
         }
-        if (page === 'dashboard') this.loadDashboardData();
-        if (page === 'profile')   this.loadProfile();
-        if (page === 'orders')    this.loadMyOrders();
-        if (page === 'home')      this.loadDashboardData();
+        if (page === 'dashboard')    this.loadDashboardData();
+        if (page === 'profile')      this.loadProfile();
+        if (page === 'orders')       this.loadMyOrders();
+        if (page === 'home')         { this.loadDashboardData(); this.loadLeaderboard(); }
+        if (page === 'leaderboard')  this.loadLeaderboard();
+        if (page === 'wishlist')     {
+            if (role === 'charity')    this.loadCharityWishlist();
+            else                       this.loadWishlistForHosts();
+        }
+        if (page === 'stale')        this.loadStaleRequests();
 
         window.scrollTo({ top: 0, behavior: 'smooth' });
     }
@@ -157,7 +213,6 @@ class CommunityApp {
     // ─────────────────────────────────────────
 
     setupEventListeners() {
-        // Toggle login / register
         document.getElementById('toRegister')?.addEventListener('click', (e) => {
             e.preventDefault();
             document.getElementById('loginSection').style.display    = 'none';
@@ -168,38 +223,32 @@ class CommunityApp {
             document.getElementById('registerSection').style.display = 'none';
             document.getElementById('loginSection').style.display    = 'block';
         });
-
-        // Login form
         document.getElementById('loginForm')?.addEventListener('submit', async (e) => {
             e.preventDefault(); await this.handleLoginSubmit();
         });
-
-        // Register form
         document.getElementById('registerForm')?.addEventListener('submit', async (e) => {
             e.preventDefault(); await this.handleRegisterSubmit();
         });
-
-        // Logout
         document.getElementById('logoutBtn')?.addEventListener('click', () => {
             this.api.logout();
             this.user = null;
             this.updateUIForRole(null);
             this.showToast('Logged out.', 'info');
-            // Navigate to login page — no reload needed, avoids ENOENT on the fallback route
             setTimeout(() => this.navigateTo('login'), 800);
         });
-
         document.getElementById('loginBtn')?.addEventListener('click', () => this.navigateTo('login'));
-
-        // Donation form (host)
         document.getElementById('donationForm')?.addEventListener('submit', (e) => {
             e.preventDefault();
             this.handleDonationSubmit(e.target);
         });
-
-        // Modal close buttons
         document.querySelectorAll('[data-modal-close]').forEach((btn) => {
             btn.addEventListener('click', () => btn.closest('.modal')?.classList.remove('active'));
+        });
+
+        // Feature 7: wishlist add form
+        document.getElementById('wishlistForm')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await this.handleWishlistSubmit(e.target);
         });
     }
 
@@ -213,11 +262,10 @@ class CommunityApp {
         const btn      = document.getElementById('loginSubmitBtn');
 
         if (!email || !password) { this.showToast('Please fill in all fields.', 'error'); return; }
-
         if (btn) { btn.textContent = 'Signing in…'; btn.disabled = true; }
         try {
-            const res = await this.api.login({ email, password });
-            this.user = res.data.user;
+            const res  = await this.api.login({ email, password });
+            this.user  = res.data.user;
             localStorage.setItem('community_user', JSON.stringify(this.user));
             this.updateUIForRole(this.user.role);
             this.showToast(`Welcome back, ${this.user.name}! 👋`, 'success');
@@ -232,10 +280,10 @@ class CommunityApp {
     }
 
     async handleRegisterSubmit() {
-        const name     = document.getElementById('regName')?.value.trim()     || '';
-        const email    = document.getElementById('regEmail')?.value.trim()    || '';
-        const role     = document.getElementById('regRole')?.value             || '';
-        const password = document.getElementById('regPassword')?.value         || '';
+        const name     = document.getElementById('regName')?.value.trim()  || '';
+        const email    = document.getElementById('regEmail')?.value.trim() || '';
+        const role     = document.getElementById('regRole')?.value          || '';
+        const password = document.getElementById('regPassword')?.value      || '';
         const btn      = document.getElementById('registerSubmitBtn');
 
         if (!name || !email || !role || !password) {
@@ -260,9 +308,16 @@ class CommunityApp {
     // ─────────────────────────────────────────
 
     async loadHostDashboard() {
-        await this.loadMyDonations();
+        await Promise.all([
+            this.loadMyDonations(),
+            this.loadWishlistForHosts()  // Feature 7
+        ]);
     }
 
+    /**
+     * FEATURE 3: reads expiryTime from form.
+     * FEATURE 2: reads pickupLat / pickupLng if provided.
+     */
     async handleDonationSubmit(form) {
         const validator = new FormValidator(form);
         validator.clearErrors();
@@ -273,7 +328,6 @@ class CommunityApp {
 
         try {
             const fd = new FormData(form);
-            // Map the actual HTML form field names to the API body
             const foodType        = fd.get('foodType')        || '';
             const foodDescription = fd.get('foodDescription') || '';
             const servings        = fd.get('servings')        || '';
@@ -281,21 +335,19 @@ class CommunityApp {
             const pickupTimeStart = fd.get('pickupTimeStart') || '';
             const pickupTimeEnd   = fd.get('pickupTimeEnd')   || '';
 
-            const body = {
-                // food_description combines type + description for a clear label
+            await this.api.createDonation({
                 foodDescription:     foodType + (foodDescription ? ` — ${foodDescription}` : ''),
-                // quantity uses servings count
                 quantity:            servings ? `${servings} servings` : 'Unspecified',
                 pickupAddress:       fd.get('pickupAddress')  || '',
                 contactPhone:        fd.get('contactPhone')   || '',
-                // preferred_pickup_time combines date + time window
                 preferredPickupTime: pickupDate
                     ? `${pickupDate}${pickupTimeStart ? ', ' + pickupTimeStart : ''}${pickupTimeEnd ? ' – ' + pickupTimeEnd : ''}`
                     : '',
-                notes:               fd.get('specialInstructions') || fd.get('notes') || ''
-            };
-
-            await this.api.createDonation(body);
+                notes:       fd.get('specialInstructions') || fd.get('notes') || '',
+                expiryTime:  fd.get('expiryTime')  || null,     // Feature 3
+                pickupLat:   fd.get('pickupLat')   || null,     // Feature 2
+                pickupLng:   fd.get('pickupLng')   || null      // Feature 2
+            });
             this.showToast('Donation request submitted! Charities can now see it. 💚', 'success');
             form.reset();
             await this.loadMyDonations();
@@ -324,10 +376,12 @@ class CommunityApp {
     }
 
     renderDonationCard(d) {
-        const label = STATUS_LABELS[d.status] || d.status;
-        const color = STATUS_COLORS[d.status] || '#6b7280';
+        const label     = STATUS_LABELS[d.status] || d.status;
+        const color     = STATUS_COLORS[d.status] || '#6b7280';
+        const countdown = d.expiry_time ? this.renderExpiryBadge(d.id, d.expiry_time) : '';   // Feature 3
+
         return `
-        <div class="donation-card">
+        <div class="donation-card" data-id="${d.id}">
           <div class="donation-header">
             <div>
               <h3>${d.food_description}</h3>
@@ -335,10 +389,68 @@ class CommunityApp {
             </div>
             <span class="status-badge" style="background:${color}20;color:${color};border:1px solid ${color}40">${label}</span>
           </div>
-          ${d.charity_name  ? `<p>🏥 <strong>Charity:</strong> ${d.charity_name}</p>` : ''}
+          ${countdown}
+          ${d.charity_name   ? `<p>🏥 <strong>Charity:</strong> ${d.charity_name}</p>` : ''}
           ${d.volunteer_name ? `<p>🚴 <strong>Volunteer:</strong> ${d.volunteer_name} ${d.volunteer_phone ? '· ' + d.volunteer_phone : ''}</p>` : ''}
           <p class="donation-meta">ID: ${d.id} · ${DateTimeUtils.timeAgo(d.created_at)}</p>
+          ${d.receipt_path && d.status === 'COMPLETED'
+              ? `<a class="btn-sm btn-outline" href="${this.api.getReceiptUrl(d.id)}" target="_blank">📄 Download Receipt</a>`
+              : ''}
         </div>`;
+    }
+
+    // ─────────────────────────────────────────
+    // FEATURE 3 · EXPIRY COUNTDOWN
+    // ─────────────────────────────────────────
+
+    /**
+     * Returns the HTML for a countdown badge and registers a timer
+     * that updates it every second.  Call `this.clearExpiryTimers()` when
+     * the container is about to be replaced to avoid ghost intervals.
+     */
+    renderExpiryBadge(id, expiryTime) {
+        const el_id = `expiry-${id}`;
+        // Schedule the live update (deferred so the element exists in DOM)
+        setTimeout(() => this._startCountdown(el_id, new Date(expiryTime)), 50);
+        return `<div class="expiry-badge" id="${el_id}">⏳ Calculating…</div>`;
+    }
+
+    _startCountdown(el_id, expiryDate) {
+        const update = () => {
+            const el   = document.getElementById(el_id);
+            if (!el) { clearInterval(timer); this._expiryTimers.delete(el_id); return; }
+
+            const msLeft = expiryDate - Date.now();
+            if (msLeft <= 0) {
+                el.textContent = '⚠️ Expired';
+                el.style.color = '#ef4444';
+                clearInterval(timer);
+                this._expiryTimers.delete(el_id);
+                return;
+            }
+
+            const h = Math.floor(msLeft / 3_600_000);
+            const m = Math.floor((msLeft % 3_600_000) / 60_000);
+            const s = Math.floor((msLeft % 60_000) / 1_000);
+            const urgent = msLeft < 30 * 60_000;  // < 30 min → red
+
+            el.textContent      = `⏳ Expires in: ${h}h ${m}m ${s}s`;
+            el.style.color      = urgent ? '#ef4444' : '#f59e0b';
+            el.style.fontWeight = urgent ? '700' : '500';
+        };
+
+        // Clear any existing timer for the same element
+        if (this._expiryTimers.has(el_id)) {
+            clearInterval(this._expiryTimers.get(el_id));
+        }
+        update();
+        const timer = setInterval(update, 1_000);
+        this._expiryTimers.set(el_id, timer);
+    }
+
+    clearExpiryTimers() {
+        this._expiryTimers.forEach(clearInterval);
+        this._expiryTimers.clear();
     }
 
     // ─────────────────────────────────────────
@@ -353,7 +465,9 @@ class CommunityApp {
     }
 
     async loadAvailableRequests() {
-        const container = document.getElementById('charityOrdersList') || document.getElementById('availableRequestsGrid') || document.getElementById('requestsGrid');
+        const container = document.getElementById('charityOrdersList')
+                       || document.getElementById('availableRequestsGrid')
+                       || document.getElementById('requestsGrid');
         if (!container) return;
         container.innerHTML = '<div class="spinner"></div>';
         try {
@@ -376,6 +490,7 @@ class CommunityApp {
                 ${r.contact_phone ? `<div class="request-detail"><span>📞</span> ${r.contact_phone}</div>` : ''}
                 <div class="request-detail"><span>🏠</span> Host: ${r.host_name}</div>
               </div>
+              ${r.expiry_time ? this.renderExpiryBadge(r.id + '-ch', r.expiry_time) : ''}
               ${r.notes ? `<p class="request-notes">${r.notes}</p>` : ''}
               <div class="request-footer">
                 <button class="btn-accept" onclick="app.charityAcceptRequest('${r.id}', this)">
@@ -417,20 +532,35 @@ class CommunityApp {
         }
     }
 
+    /**
+     * FEATURE 1: Shows a photo URL input when status is FOOD_PICKED_UP (confirm receipt).
+     * FEATURE 4: Shows PDF download link when COMPLETED.
+     */
     renderCharityRequestCard(r) {
         const label = STATUS_LABELS[r.status] || r.status;
         const color = STATUS_COLORS[r.status] || '#6b7280';
 
         let actionBtn = '';
         if (r.status === 'FOOD_PICKED_UP') {
-            actionBtn = `<button class="btn-success full-width mt-sm" onclick="app.charityConfirmReceipt('${r.id}')">
-                           ✓ Confirm Receipt
-                         </button>`;
+            actionBtn = `
+            <div class="photo-upload-group mt-sm">
+              <label class="small-label">📷 Proof of Delivery URL (optional)</label>
+              <input type="url" id="pod-url-${r.id}" class="input-sm" placeholder="https://…/photo.jpg">
+            </div>
+            <button class="btn-success full-width mt-sm"
+                    onclick="app.charityConfirmReceipt('${r.id}')">
+              ✓ Confirm Receipt
+            </button>`;
         } else if (r.status === 'DELIVERED_TO_CHARITY') {
-            actionBtn = `<button class="btn-primary full-width mt-sm" onclick="app.charityCompleteDelivery('${r.id}')">
+            actionBtn = `<button class="btn-primary full-width mt-sm"
+                                 onclick="app.charityCompleteDelivery('${r.id}')">
                            🎉 Mark as Completed
                          </button>`;
         }
+
+        const receiptBtn = r.status === 'COMPLETED' && r.receipt_path
+            ? `<a class="btn-sm btn-outline" href="${this.api.getReceiptUrl(r.id)}" target="_blank">📄 Receipt</a>`
+            : '';
 
         return `
         <div class="delivery-card">
@@ -448,13 +578,21 @@ class CommunityApp {
                 : '<p class="text-muted">⏳ Waiting for a volunteer to accept…</p>'}
           </div>
           ${actionBtn}
+          ${receiptBtn}
         </div>`;
     }
 
+    /**
+     * FEATURE 1: Reads photo URL from the optional input before confirming receipt.
+     */
     async charityConfirmReceipt(id) {
+        const photoUrl = document.getElementById(`pod-url-${id}`)?.value?.trim() || null;
         try {
-            await this.api.confirmReceipt(id);
-            this.showToast('Receipt confirmed! 🎉', 'success');
+            await this.api.confirmReceipt(id, photoUrl);
+            this.showToast(
+                photoUrl ? 'Receipt confirmed with photo proof! 🎉' : 'Receipt confirmed! 🎉',
+                'success'
+            );
             await this.loadCharityMyRequests();
         } catch (err) {
             this.showToast(err.message || 'Could not confirm receipt.', 'error');
@@ -463,8 +601,11 @@ class CommunityApp {
 
     async charityCompleteDelivery(id) {
         try {
-            await this.api.completeDelivery(id);
-            this.showToast('Delivery marked as completed! 🌟', 'success');
+            const res = await this.api.completeDelivery(id);
+            const msg = res.data?.receiptFilename
+                ? 'Delivery completed! PDF receipt generated. 🌟'
+                : 'Delivery marked as completed! 🌟';
+            this.showToast(msg, 'success');
             await this.loadCharityMyRequests();
         } catch (err) {
             this.showToast(err.message || 'Could not complete delivery.', 'error');
@@ -482,9 +623,14 @@ class CommunityApp {
         ]);
     }
 
+    /**
+     * FEATURE 2: Highlights nearby pickups with a special badge + distance label.
+     * FEATURE 3: Shows countdown for expiring food.
+     */
     async loadAvailablePickups() {
         const container = document.getElementById('requestsGrid') || document.getElementById('availablePickupsGrid');
         if (!container) return;
+        this.clearExpiryTimers();
         container.innerHTML = '<div class="spinner"></div>';
         try {
             const res  = await this.api.getAvailablePickups();
@@ -493,25 +639,40 @@ class CommunityApp {
                 container.innerHTML = '<p class="text-center text-muted">No pickups available right now. Check back soon!</p>';
                 return;
             }
-            container.innerHTML = list.map((p) => `
-            <div class="request-card" data-id="${p.id}">
-              <div class="request-header">
-                <div class="request-title">${p.food_description}</div>
-                <div class="request-badge nearby">Available</div>
-              </div>
-              <div class="request-details">
-                <div class="request-detail"><span>🍽️</span> ${p.quantity}</div>
-                <div class="request-detail"><span>📍</span> ${p.pickup_address}</div>
-                ${p.preferred_pickup_time ? `<div class="request-detail"><span>⏰</span> ${p.preferred_pickup_time}</div>` : ''}
-                <div class="request-detail"><span>🏠</span> Host: ${p.host_name}</div>
-                <div class="request-detail"><span>🏥</span> Deliver to: ${p.charity_name}</div>
-              </div>
-              ${p.notes ? `<p class="request-notes">${p.notes}</p>` : ''}
-              <div class="request-footer">
-                <button class="btn-accept"  onclick="app.volunteerAcceptPickup('${p.id}', this)">Accept Pickup</button>
-                <button class="btn-decline" onclick="app.volunteerDeclinePickup('${p.id}', this)">Decline</button>
-              </div>
-            </div>`).join('');
+            container.innerHTML = list.map((p) => {
+                // Feature 2: nearby badge
+                const nearbyBadge = p.nearby
+                    ? `<span class="request-badge nearby">📍 Nearby ${p.distanceKm !== null ? `· ${p.distanceKm} km` : ''}</span>`
+                    : (p.distanceKm !== null
+                        ? `<span class="request-badge">${p.distanceKm} km away</span>`
+                        : `<span class="request-badge">Available</span>`);
+
+                // Feature 3: expiry countdown
+                const expiryHtml = p.expiry_time
+                    ? this.renderExpiryBadge(p.id + '-vol', p.expiry_time)
+                    : '';
+
+                return `
+                <div class="request-card ${p.nearby ? 'card-nearby' : ''}" data-id="${p.id}">
+                  <div class="request-header">
+                    <div class="request-title">${p.food_description}</div>
+                    ${nearbyBadge}
+                  </div>
+                  ${expiryHtml}
+                  <div class="request-details">
+                    <div class="request-detail"><span>🍽️</span> ${p.quantity}</div>
+                    <div class="request-detail"><span>📍</span> ${p.pickup_address}</div>
+                    ${p.preferred_pickup_time ? `<div class="request-detail"><span>⏰</span> ${p.preferred_pickup_time}</div>` : ''}
+                    <div class="request-detail"><span>🏠</span> Host: ${p.host_name}</div>
+                    <div class="request-detail"><span>🏥</span> Deliver to: ${p.charity_name}</div>
+                  </div>
+                  ${p.notes ? `<p class="request-notes">${p.notes}</p>` : ''}
+                  <div class="request-footer">
+                    <button class="btn-accept"  onclick="app.volunteerAcceptPickup('${p.id}', this)">Accept Pickup</button>
+                    <button class="btn-decline" onclick="app.volunteerDeclinePickup('${p.id}', this)">Decline</button>
+                  </div>
+                </div>`;
+            }).join('');
         } catch {
             container.innerHTML = '<p class="error">Could not load available pickups.</p>';
         }
@@ -529,10 +690,16 @@ class CommunityApp {
         }
     }
 
+    /**
+     * FEATURE 6: Prompts for a reason before declining.
+     */
     async volunteerDeclinePickup(id, btn) {
+        const reason = window.prompt('Please provide a reason for declining (optional):');
+        if (reason === null) return;  // User pressed Cancel — abort
+
         if (btn) { btn.textContent = 'Declining…'; btn.disabled = true; }
         try {
-            await this.api.declinePickup(id);
+            await this.api.declinePickup(id, reason || null);
             this.showToast('Pickup declined.', 'info');
             await this.loadAvailablePickups();
         } catch (err) {
@@ -547,24 +714,41 @@ class CommunityApp {
         try {
             const res  = await this.api.getMyDeliveries();
             const list = res.data.deliveries || [];
-            if (!list.length) return; // Keep the available pickups content visible
+            if (!list.length) return;
             container.innerHTML = list.map((d) => this.renderVolunteerDeliveryCard(d)).join('');
         } catch { /* silent fail — not the primary content */ }
     }
 
+    /**
+     * FEATURE 1: Photo URL input when confirming food collected (FOOD_PICKED_UP).
+     * FEATURE 3: Expiry countdown on active deliveries.
+     */
     renderVolunteerDeliveryCard(d) {
         const label = STATUS_LABELS[d.status] || d.status;
         const color = STATUS_COLORS[d.status] || '#6b7280';
 
+        // Feature 3: show countdown for active pickups
+        const countdown = d.expiry_time && d.status !== 'FOOD_PICKED_UP'
+            ? this.renderExpiryBadge(d.id + '-del', d.expiry_time)
+            : '';
+
         let actionBtn = '';
         if (d.status === 'VOLUNTEER_ASSIGNED') {
-            actionBtn = `<button class="btn-primary full-width mt-sm" onclick="app.volunteerUpdateStatus('${d.id}','PICKUP_IN_PROGRESS')">
+            actionBtn = `<button class="btn-primary full-width mt-sm"
+                                 onclick="app.volunteerUpdateStatus('${d.id}','PICKUP_IN_PROGRESS')">
                            🚴 Start Pickup Journey
                          </button>`;
         } else if (d.status === 'PICKUP_IN_PROGRESS') {
-            actionBtn = `<button class="btn-primary full-width mt-sm" onclick="app.volunteerUpdateStatus('${d.id}','FOOD_PICKED_UP')">
-                           📦 Confirm Food Collected
-                         </button>`;
+            // Feature 1: photo URL input when confirming collection
+            actionBtn = `
+            <div class="photo-upload-group mt-sm">
+              <label class="small-label">📷 Photo Proof of Collection (optional)</label>
+              <input type="url" id="poc-url-${d.id}" class="input-sm" placeholder="https://…/photo.jpg">
+            </div>
+            <button class="btn-primary full-width mt-sm"
+                    onclick="app.volunteerUpdateStatus('${d.id}','FOOD_PICKED_UP',document.getElementById('poc-url-${d.id}')?.value||null)">
+              📦 Confirm Food Collected
+            </button>`;
         }
 
         return `
@@ -573,6 +757,7 @@ class CommunityApp {
             <h3>${d.food_description}</h3>
             <span class="status-badge" style="background:${color}20;color:${color};border:1px solid ${color}40">${label}</span>
           </div>
+          ${countdown}
           <div class="delivery-body">
             <p><strong>Pick up from:</strong> ${d.host_name} — ${d.pickup_address}</p>
             ${d.preferred_pickup_time ? `<p><strong>Time:</strong> ${d.preferred_pickup_time}</p>` : ''}
@@ -584,12 +769,17 @@ class CommunityApp {
         </div>`;
     }
 
-    async volunteerUpdateStatus(id, status) {
+    /**
+     * FEATURE 1: Passes photoUrl to the API.
+     */
+    async volunteerUpdateStatus(id, status, photoUrl = null) {
         try {
-            await this.api.updateDeliveryStatus(id, status);
+            await this.api.updateDeliveryStatus(id, status, photoUrl || null);
             const labels = {
                 PICKUP_IN_PROGRESS: 'Journey started! 🚴 Head to the pickup address.',
-                FOOD_PICKED_UP:     'Food collected! 📦 Head to the charity now.',
+                FOOD_PICKED_UP:     photoUrl
+                    ? 'Food collected with photo proof! 📦 Head to the charity.'
+                    : 'Food collected! 📦 Head to the charity now.'
             };
             this.showToast(labels[status] || 'Status updated.', 'success');
             await this.loadMyDeliveries();
@@ -610,7 +800,7 @@ class CommunityApp {
             const res    = await this.api.getMyOrders();
             const orders = res.data?.orders ?? [];
             if (!orders.length) {
-                container.innerHTML = '<div class="empty-state"><p>No orders yet. Your donations and deliveries will appear here.</p></div>';
+                container.innerHTML = '<div class="empty-state"><p>No orders yet.</p></div>';
                 return;
             }
             container.innerHTML = orders.map((o) => this.renderOrderCard(o)).join('');
@@ -619,6 +809,9 @@ class CommunityApp {
         }
     }
 
+    /**
+     * FEATURE 1: Timeline events that have photo_url now show a thumbnail.
+     */
     renderOrderCard(order) {
         const color = STATUS_COLORS[order.status] || '#6b7280';
         const label = STATUS_LABELS[order.status] || order.status;
@@ -633,9 +826,8 @@ class CommunityApp {
             { key: 'COMPLETED',            icon: '🎉', label: 'Completed' }
         ];
 
-        const ORDER = STEPS.map(s => s.key);
+        const ORDER      = STEPS.map(s => s.key);
         const currentIdx = ORDER.indexOf(order.status);
-
         const progressHTML = STEPS.map((step, i) => {
             const isDone    = i < currentIdx;
             const isCurrent = i === currentIdx;
@@ -659,8 +851,18 @@ class CommunityApp {
               </div>
               <div class="timeline-event-name"><strong>${ev.event}</strong></div>
               ${ev.note ? `<div class="timeline-note">${ev.note}</div>` : ''}
+              ${ev.photo_url
+                  ? `<a href="${ev.photo_url}" target="_blank" rel="noopener">
+                       <img class="timeline-photo" src="${ev.photo_url}" alt="Proof photo"
+                            onerror="this.style.display='none'">
+                     </a>`
+                  : ''}
             </div>
           </div>`).join('');
+
+        const receiptBtn = order.status === 'COMPLETED' && order.receipt_path
+            ? `<a class="btn-sm btn-outline" href="${this.api.getReceiptUrl(order.id)}" target="_blank">📄 Receipt</a>`
+            : '';
 
         return `
         <div class="order-card">
@@ -686,6 +888,7 @@ class CommunityApp {
           </details>` : ''}
           <div class="order-footer">
             <span class="order-id">ID: ${order.id}</span>
+            ${receiptBtn}
             <button class="btn-sm btn-outline" onclick="app.refreshOrder('${order.id}')">🔄 Refresh</button>
           </div>
         </div>`;
@@ -697,6 +900,201 @@ class CommunityApp {
     }
 
     // ─────────────────────────────────────────
+    // FEATURE 5 · IMPACT LEADERBOARD
+    // ─────────────────────────────────────────
+
+    async loadLeaderboard() {
+        const container = document.getElementById('leaderboard');
+        if (!container) return;
+        container.innerHTML = '<div class="spinner"></div>';
+        try {
+            const res  = await this.api.getLeaderboard();
+            const { hosts, volunteers } = res.data;
+            container.innerHTML = this.renderLeaderboard(hosts, volunteers);
+        } catch {
+            container.innerHTML = '<p class="error">Could not load leaderboard.</p>';
+        }
+    }
+
+    renderLeaderboard(hosts, volunteers) {
+        const medal = (i) => ['🥇','🥈','🥉'][i] || `#${i + 1}`;
+
+        const hostRows = hosts.length
+            ? hosts.map((h, i) => `
+              <tr>
+                <td class="rank">${medal(i)}</td>
+                <td>${h.name}</td>
+                <td class="stat">${h.total_donations}</td>
+                <td class="stat">${h.total_servings.toLocaleString()}</td>
+              </tr>`).join('')
+            : '<tr><td colspan="4" class="empty">No data yet</td></tr>';
+
+        const volRows = volunteers.length
+            ? volunteers.map((v, i) => `
+              <tr>
+                <td class="rank">${medal(i)}</td>
+                <td>${v.name}</td>
+                <td class="stat">${v.total_deliveries}</td>
+                <td class="stat">${v.total_servings_delivered.toLocaleString()}</td>
+              </tr>`).join('')
+            : '<tr><td colspan="4" class="empty">No data yet</td></tr>';
+
+        return `
+        <div class="leaderboard-wrap">
+          <div class="leaderboard-half">
+            <h3>🏠 Top Hosts</h3>
+            <table class="lb-table">
+              <thead><tr><th>Rank</th><th>Name</th><th>Donations</th><th>Servings</th></tr></thead>
+              <tbody>${hostRows}</tbody>
+            </table>
+          </div>
+          <div class="leaderboard-half">
+            <h3>🚴 Top Volunteers</h3>
+            <table class="lb-table">
+              <thead><tr><th>Rank</th><th>Name</th><th>Deliveries</th><th>Servings</th></tr></thead>
+              <tbody>${volRows}</tbody>
+            </table>
+          </div>
+        </div>`;
+    }
+
+    // ─────────────────────────────────────────
+    // FEATURE 7 · CHARITY WISHLIST
+    // ─────────────────────────────────────────
+
+    /** Host view: browse what charities need before creating a donation. */
+    async loadWishlistForHosts() {
+        const container = document.getElementById('charityNeedsPanel');
+        if (!container) return;
+        try {
+            const res   = await this.api.getCharityWishlistForHosts();
+            const items = res.data.items || [];
+            if (!items.length) {
+                container.innerHTML = '<p class="text-muted">No charity needs listed right now.</p>';
+                return;
+            }
+            container.innerHTML = `
+            <h4 class="section-subtitle">🏥 What Charities Need</h4>
+            <div class="wishlist-grid">
+              ${items.map(item => this._renderWishlistCard(item, false)).join('')}
+            </div>`;
+        } catch { /* non-critical panel */ }
+    }
+
+    /** Charity view: manage their own wishlist. */
+    async loadCharityWishlist() {
+        const container = document.getElementById('wishlistContainer');
+        if (!container) return;
+        container.innerHTML = '<div class="spinner"></div>';
+        try {
+            const res   = await this.api.getCharityWishlist();
+            const items = res.data.items || [];
+            container.innerHTML = `
+            <div class="wishlist-grid">
+              ${items.length
+                  ? items.map(item => this._renderWishlistCard(item, true)).join('')
+                  : '<p class="empty-state">Your wishlist is empty. Add items above.</p>'}
+            </div>`;
+        } catch {
+            container.innerHTML = '<p class="error">Could not load wishlist.</p>';
+        }
+    }
+
+    _renderWishlistCard(item, showDelete) {
+        const color  = URGENCY_COLORS[item.urgency_level] || '#6b7280';
+        const ulgLbl = URGENCY_LABELS[item.urgency_level]  || item.urgency_level;
+        return `
+        <div class="wishlist-card">
+          <div class="wishlist-card-header">
+            <strong>${item.item_name}</strong>
+            <span class="urgency-badge" style="color:${color};border-color:${color}40;background:${color}15">
+              ${ulgLbl}
+            </span>
+          </div>
+          ${item.charity_name ? `<p class="wishlist-charity">🏥 ${item.charity_name}</p>` : ''}
+          ${item.notes ? `<p class="wishlist-notes">${item.notes}</p>` : ''}
+          ${showDelete
+              ? `<button class="btn-sm btn-danger mt-sm" onclick="app.deleteWishlistItem('${item.id}')">🗑 Remove</button>`
+              : ''}
+        </div>`;
+    }
+
+    async handleWishlistSubmit(form) {
+        const fd  = new FormData(form);
+        const btn = form.querySelector('[type="submit"]');
+        if (btn) { btn.textContent = 'Adding…'; btn.disabled = true; }
+        try {
+            await this.api.addWishlistItem({
+                item_name:     fd.get('item_name')     || '',
+                urgency_level: fd.get('urgency_level') || 'medium',
+                notes:         fd.get('notes')          || null
+            });
+            form.reset();
+            this.showToast('Item added to wishlist!', 'success');
+            await this.loadCharityWishlist();
+        } catch (err) {
+            this.showToast(err.message || 'Could not add item.', 'error');
+        } finally {
+            if (btn) { btn.textContent = 'Add Item'; btn.disabled = false; }
+        }
+    }
+
+    async deleteWishlistItem(id) {
+        if (!confirm('Remove this item from your wishlist?')) return;
+        try {
+            await this.api.deleteWishlistItem(id);
+            this.showToast('Item removed.', 'info');
+            await this.loadCharityWishlist();
+        } catch (err) {
+            this.showToast(err.message || 'Could not remove item.', 'error');
+        }
+    }
+
+    // ─────────────────────────────────────────
+    // FEATURE 10 · ADMIN STALE REQUESTS
+    // ─────────────────────────────────────────
+
+    async loadStaleRequests(hours = 2) {
+        const container = document.getElementById('staleRequestsContainer');
+        if (!container) return;
+        container.innerHTML = '<div class="spinner"></div>';
+        try {
+            const res  = await this.api.getStaleRequests(hours);
+            const list = res.data.staleRequests || [];
+            if (!list.length) {
+                container.innerHTML = `<div class="empty-state"><p>✅ No requests have been stuck in "Awaiting Volunteer" for more than ${hours} hour(s).</p></div>`;
+                return;
+            }
+            container.innerHTML = `
+            <div class="stale-alert">
+              ⚠️ ${list.length} request(s) stuck in ACCEPTED_BY_CHARITY for over ${hours} hour(s)
+            </div>
+            ${list.map(r => this._renderStaleCard(r)).join('')}`;
+        } catch {
+            container.innerHTML = '<p class="error">Could not load stale requests.</p>';
+        }
+    }
+
+    _renderStaleCard(r) {
+        const hoursStale = Math.floor(r.minutes_stale / 60);
+        const minsStale  = r.minutes_stale % 60;
+        const urgency    = r.minutes_stale > 240 ? '#ef4444' : '#f97316';  // > 4 h = red
+        return `
+        <div class="stale-card" style="border-left:4px solid ${urgency}">
+          <div class="stale-header">
+            <strong>${r.food_description}</strong>
+            <span class="stale-timer" style="color:${urgency}">
+              🕐 Stale for ${hoursStale}h ${minsStale}m
+            </span>
+          </div>
+          <p>📍 ${r.pickup_address}</p>
+          <p>🏠 Host: ${r.host_name} ${r.host_phone ? '· ' + r.host_phone : ''}</p>
+          <p>🏥 Charity: ${r.charity_name}</p>
+          <p class="donation-meta">ID: ${r.id} · Accepted: ${DateTimeUtils.timeAgo(r.updated_at)}</p>
+        </div>`;
+    }
+
+    // ─────────────────────────────────────────
     // DASHBOARD (admin / home stats)
     // ─────────────────────────────────────────
 
@@ -705,12 +1103,12 @@ class CommunityApp {
             const res  = await this.api.getDashboardStats();
             const data = res.data;
             const set  = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-            set('statTotalRequests',    data.totalRequests);
-            set('statCompleted',        data.completedDeliveries);
-            set('statVolunteers',       data.activeVolunteers);
-            set('statCharities',        data.verifiedCharities);
-            set('statOpen',             data.openRequests);
-            set('statInFlight',         data.inFlightDeliveries);
+            set('statTotalRequests',  data.totalRequests);
+            set('statCompleted',      data.completedDeliveries);
+            set('statVolunteers',     data.activeVolunteers);
+            set('statCharities',      data.verifiedCharities);
+            set('statOpen',           data.openRequests);
+            set('statInFlight',       data.inFlightDeliveries);
         } catch { /* dashboard stats are non-critical */ }
     }
 
@@ -743,10 +1141,10 @@ class CommunityApp {
             set('profileCreatedDetail',fmt);
 
             const roleMap = {
-                host:      { icon: '🏠', label: 'Food Host',    desc: 'You list surplus food and schedule pickups for volunteers.' },
-                volunteer: { icon: '🚴', label: 'Volunteer',    desc: 'You pick up food from hosts and deliver it to charities.' },
-                charity:   { icon: '🏥', label: 'Charity / NGO', desc: 'You accept donations and distribute food to communities.' },
-                admin:     { icon: '⚙️', label: 'Admin',        desc: 'Full access to the platform management tools.' }
+                host:      { icon: '🏠', label: 'Food Host',    desc: 'You list surplus food and schedule pickups.' },
+                volunteer: { icon: '🚴', label: 'Volunteer',    desc: 'You pick up food and deliver it to charities.' },
+                charity:   { icon: '🏥', label: 'Charity / NGO', desc: 'You accept donations and distribute food.' },
+                admin:     { icon: '⚙️', label: 'Admin',        desc: 'Full access to platform management tools.' }
             };
             const info = roleMap[user.role] || { icon: '👤', label: user.role || 'Member', desc: '' };
 
@@ -796,7 +1194,7 @@ class CommunityApp {
             { threshold: 0.1, rootMargin: '0px 0px -50px 0px' }
         );
         document.querySelectorAll('.fade-in-up,.fade-in-left,.fade-in-right,.stagger-children')
-            .forEach((el) => obs.observe(el));
+                .forEach((el) => obs.observe(el));
     }
 
     // ─────────────────────────────────────────

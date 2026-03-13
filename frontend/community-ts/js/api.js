@@ -1,9 +1,18 @@
 /* ========================================
-   COMMUNITY - API Client (compiled JS)
-   Aligned with new donation lifecycle:
-   REQUESTED → ACCEPTED_BY_CHARITY → VOLUNTEER_ASSIGNED
-   → PICKUP_IN_PROGRESS → FOOD_PICKED_UP
-   → DELIVERED_TO_CHARITY → COMPLETED
+   COMMUNITY - API Client  (Feature Pack v2)
+
+   New methods / changed signatures:
+   ─ createDonation()       — now accepts expiryTime, pickupLat, pickupLng
+   ─ confirmReceipt()       — now accepts photoUrl  (Feature 1)
+   ─ declinePickup()        — now accepts reason    (Feature 6)
+   ─ updateDeliveryStatus() — now accepts photoUrl  (Feature 1)
+   ─ getLeaderboard()       — new                   (Feature 5)
+   ─ getCharityWishlist()   — new                   (Feature 7)
+   ─ addWishlistItem()      — new                   (Feature 7)
+   ─ deleteWishlistItem()   — new                   (Feature 7)
+   ─ getCharityWishlistForHosts() — new             (Feature 7)
+   ─ getStaleRequests()     — new admin             (Feature 10)
+   ─ getReceiptUrl()        — new                   (Feature 4)
    ======================================== */
 
 const STATUS_LABELS = {
@@ -28,6 +37,20 @@ const STATUS_COLORS = {
     CANCELLED:            '#ef4444'
 };
 
+const URGENCY_COLORS = {
+    low:      '#6b7280',
+    medium:   '#f59e0b',
+    high:     '#f97316',
+    critical: '#ef4444'
+};
+
+const URGENCY_LABELS = {
+    low:      '🟢 Low',
+    medium:   '🟡 Medium',
+    high:     '🟠 High',
+    critical: '🔴 Critical'
+};
+
 class CommunityAPI {
     constructor(baseURL = '/api/community') {
         this.baseURL = baseURL;
@@ -35,7 +58,7 @@ class CommunityAPI {
 
     getHeaders() {
         const headers = { 'Content-Type': 'application/json' };
-        const token = localStorage.getItem('community_token');
+        const token   = localStorage.getItem('community_token');
         if (token) headers['Authorization'] = `Bearer ${token}`;
         return headers;
     }
@@ -81,12 +104,28 @@ class CommunityAPI {
 
     // ── HOST ────────────────────────────────
 
-    async createDonation(body) {
-        return this.request('POST', '/host/donations', body);
+    /**
+     * FEATURE 2: pickupLat + pickupLng for geofencing.
+     * FEATURE 3: expiryTime (ISO-8601 string) for food expiry.
+     */
+    async createDonation({ foodDescription, quantity, pickupAddress, contactPhone,
+                           preferredPickupTime, notes,
+                           expiryTime = null,
+                           pickupLat  = null,
+                           pickupLng  = null }) {
+        return this.request('POST', '/host/donations', {
+            foodDescription, quantity, pickupAddress, contactPhone,
+            preferredPickupTime, notes, expiryTime, pickupLat, pickupLng
+        });
     }
 
     async getMyDonations() {
         return this.request('GET', '/host/donations');
+    }
+
+    // FEATURE 7: Hosts browse charity needs before creating a donation
+    async getCharityWishlistForHosts() {
+        return this.request('GET', '/host/charity-wishlist');
     }
 
     // ── CHARITY ─────────────────────────────
@@ -103,12 +142,30 @@ class CommunityAPI {
         return this.request('GET', '/charity/my-requests');
     }
 
-    async confirmReceipt(donationRequestId) {
-        return this.request('POST', `/charity/confirm-receipt/${donationRequestId}`);
+    /**
+     * FEATURE 1: photoUrl attaches a proof-of-delivery image to the timeline event.
+     */
+    async confirmReceipt(donationRequestId, photoUrl = null) {
+        return this.request('POST', `/charity/confirm-receipt/${donationRequestId}`, {
+            photo_url: photoUrl
+        });
     }
 
     async completeDelivery(donationRequestId) {
         return this.request('POST', `/charity/complete/${donationRequestId}`);
+    }
+
+    // FEATURE 7: Charity manages their wishlist
+    async getCharityWishlist() {
+        return this.request('GET', '/charity/wishlist');
+    }
+
+    async addWishlistItem({ item_name, urgency_level = 'medium', notes = null }) {
+        return this.request('POST', '/charity/wishlist', { item_name, urgency_level, notes });
+    }
+
+    async deleteWishlistItem(itemId) {
+        return this.request('DELETE', `/charity/wishlist/${itemId}`);
     }
 
     // ── VOLUNTEER ───────────────────────────
@@ -125,16 +182,25 @@ class CommunityAPI {
         return this.request('POST', `/volunteer/accept-pickup/${donationRequestId}`);
     }
 
-    async declinePickup(donationRequestId) {
-        return this.request('POST', `/volunteer/decline-pickup/${donationRequestId}`);
+    /**
+     * FEATURE 6: reason is logged as a note in the timeline.
+     */
+    async declinePickup(donationRequestId, reason = null) {
+        return this.request('POST', `/volunteer/decline-pickup/${donationRequestId}`, { reason });
     }
 
     async getMyDeliveries() {
         return this.request('GET', '/volunteer/my-deliveries');
     }
 
-    async updateDeliveryStatus(donationRequestId, status) {
-        return this.request('PATCH', `/volunteer/update-status/${donationRequestId}`, { status });
+    /**
+     * FEATURE 1: photoUrl attaches proof of collection to the timeline (used at FOOD_PICKED_UP).
+     */
+    async updateDeliveryStatus(donationRequestId, status, photoUrl = null) {
+        return this.request('PATCH', `/volunteer/update-status/${donationRequestId}`, {
+            status,
+            photo_url: photoUrl
+        });
     }
 
     // ── SHARED ──────────────────────────────
@@ -147,6 +213,11 @@ class CommunityAPI {
         return this.request('GET', `/donation-requests/${id}/timeline`);
     }
 
+    /** FEATURE 4: Returns the PDF receipt download URL for a completed request. */
+    getReceiptUrl(donationRequestId) {
+        return `${this.baseURL}/donation-requests/${donationRequestId}/receipt`;
+    }
+
     async getMyOrders() {
         return this.request('GET', '/orders/mine');
     }
@@ -155,5 +226,20 @@ class CommunityAPI {
 
     async getDashboardStats() {
         return this.request('GET', '/dashboard/stats');
+    }
+
+    // ── LEADERBOARD (FEATURE 5) ──────────────
+
+    async getLeaderboard() {
+        return this.request('GET', '/leaderboard');
+    }
+
+    // ── ADMIN (FEATURE 10) ───────────────────
+
+    /**
+     * @param {number} hours — flag requests stuck longer than this many hours (default 2)
+     */
+    async getStaleRequests(hours = 2) {
+        return this.request('GET', `/admin/stale-requests?hours=${hours}`);
     }
 }
