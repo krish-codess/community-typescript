@@ -210,9 +210,10 @@
                     <a href="#home" class="nav-link active" data-page="home" data-role-visible="guest,host,volunteer,charity,admin">Home</a>
                     <a href="#donate" class="nav-link" data-page="donate" data-role-visible="host,charity">Donate Food</a>
                     <a href="#volunteer" class="nav-link" data-page="volunteer" data-role-visible="volunteer">Volunteer</a>
-                    <a href="#charityDashboard" class="nav-link" data-page="charity" data-role-visible="charity">Charity</a>
+                    <a href="#charity" class="nav-link" data-page="charity" data-role-visible="charity">Charity</a>
                     <a href="#dashboard" class="nav-link" data-page="dashboard" data-role-visible="admin">Dashboard</a>
                     <a href="#profile" class="nav-link" data-page="profile" data-role-visible="host,volunteer,charity,admin">Profile</a>
+                    <a href="#orders" class="nav-link" data-page="orders" data-role-visible="host,volunteer,charity,admin">My Orders</a>
                 </div>
 
                 <div class="nav-actions">
@@ -1563,7 +1564,7 @@
                             <h3 class="form-section-title">Pickup Details</h3>
                             <div class="form-group">
                                 <label for="pickupAddress">Pickup Address</label>
-                                <textarea id="pickupAddress" name="pickupAddress" rows="2" placeholder="Start typing — Google will suggest addresses" required></textarea>
+                                <input type="text" id="pickupAddress" name="pickupAddress" placeholder="Start typing your address…" required autocomplete="off"/>
                                 <!-- Hidden lat/lng populated by Google Places autocomplete -->
                                 <input type="hidden" id="pickupLat" name="pickupLat"/>
                                 <input type="hidden" id="pickupLng" name="pickupLng"/>
@@ -1622,16 +1623,16 @@
                     <form id="createRecurringForm" onsubmit="app.handleCreateRecurring(event)" style="background:var(--bg-secondary,#f9fafb);border:1px solid var(--border,#e5e7eb);border-radius:10px;padding:1.25rem;margin-bottom:1rem;">
                         <div class="form-group">
                             <label for="recFoodDesc">Food Description</label>
-                            <input type="text" id="recFoodDesc" name="foodDescription" required placeholder="E.g., Office lunch leftovers"/>
+                            <input type="text" id="recFoodDesc" name="rec_foodDescription" required placeholder="E.g., Office lunch leftovers"/>
                         </div>
                         <div class="p2-form-row">
                             <div class="form-group">
                                 <label for="recQuantity">Quantity</label>
-                                <input type="text" id="recQuantity" name="quantity" required placeholder="E.g., 20 portions"/>
+                                <input type="text" id="recQuantity" name="rec_quantity" required placeholder="E.g., 20 portions"/>
                             </div>
                             <div class="form-group">
                                 <label for="recDay">Repeats Every</label>
-                                <select id="recDay" name="recurrenceDay">
+                                <select id="recDay" name="rec_recurrenceDay">
                                     <option value="1">Monday</option>
                                     <option value="2">Tuesday</option>
                                     <option value="3">Wednesday</option>
@@ -1643,20 +1644,20 @@
                             </div>
                             <div class="form-group">
                                 <label for="recTime">Preferred Time</label>
-                                <input type="time" id="recTime" name="preferredTime"/>
+                                <input type="time" id="recTime" name="rec_preferredTime"/>
                             </div>
                         </div>
                         <div class="form-group">
                             <label for="recAddress">Pickup Address</label>
-                            <input type="text" id="recAddress" name="pickupAddress" required placeholder="Full address"/>
+                            <input type="text" id="recAddress" name="rec_pickupAddress" required placeholder="Full address"/>
                         </div>
                         <div class="form-group">
                             <label for="recPhone">Contact Phone</label>
-                            <input type="tel" id="recPhone" name="contactPhone" placeholder="+91 XXXXXXXXXX"/>
+                            <input type="tel" id="recPhone" name="rec_contactPhone" placeholder="+91 XXXXXXXXXX"/>
                         </div>
                         <div class="p2-checks">
-                            <label class="p2-check"><input type="checkbox" name="isVegan"/> 🌱 Vegan</label>
-                            <label class="p2-check"><input type="checkbox" name="isGlutenFree"/> 🌾 Gluten-Free</label>
+                            <label class="p2-check"><input type="checkbox" name="rec_isVegan"/> 🌱 Vegan</label>
+                            <label class="p2-check"><input type="checkbox" name="rec_isGlutenFree"/> 🌾 Gluten-Free</label>
                         </div>
                         <button type="submit" class="btn-primary" style="margin-top:.75rem;">Schedule Recurring Donation</button>
                     </form>
@@ -1698,7 +1699,7 @@
             </div>
         </section>
 
-        <section class="page" id="charityDashboard" data-role-visible="charity">
+        <section class="page" id="charityPage" data-role-visible="charity">
             <div class="container">
                 <div class="page-header">
                     <h1 class="page-title">Available Donations</h1>
@@ -2028,6 +2029,380 @@
     <script src="js/api.js"></script>
     <script src="js/components.js"></script>
     <script src="js/app.js"></script>
+
+    <!-- ═══════════════════════════════════════════════════════
+         PHASE 2 — All new features wired up here.
+         Extends CommunityApp with new methods, then patches
+         init() and navigateTo() to call them automatically.
+    ═══════════════════════════════════════════════════════ -->
+    <script>
+    (function patchPhase2() {
+        if (typeof CommunityApp === 'undefined') {
+            document.addEventListener('DOMContentLoaded', patchPhase2);
+            return;
+        }
+        var proto = CommunityApp.prototype;
+
+        /* ── D. DARK MODE ──────────────────────────── */
+        proto.initDarkMode = function () {
+            if (localStorage.getItem('community_dark_mode') === 'true')
+                document.documentElement.classList.add('dark-mode');
+        };
+        proto.setupDarkModeToggle = function () {
+            var btn = document.getElementById('darkModeToggle');
+            if (!btn) return;
+            var update = function () {
+                var dark = document.documentElement.classList.contains('dark-mode');
+                btn.title       = dark ? 'Switch to Light Mode' : 'Switch to Dark Mode';
+                btn.textContent = dark ? '\u2600\uFE0F' : '\uD83C\uDF19';
+            };
+            btn.addEventListener('click', function () {
+                document.documentElement.classList.toggle('dark-mode');
+                localStorage.setItem('community_dark_mode',
+                    String(document.documentElement.classList.contains('dark-mode')));
+                update();
+            });
+            update();
+        };
+
+        /* ── A. GOOGLE PLACES AUTOCOMPLETE ─────────── */
+        proto.initPlacesAutocomplete = function () {
+            var input = document.getElementById('pickupAddress');
+            if (!input || input._p2ac) return;
+
+            // Don't attempt if the key is still the placeholder
+            var scriptSrc = (document.querySelector('script[src*="maps.googleapis.com"]') || {}).src || '';
+            if (!scriptSrc || scriptSrc.indexOf('YOUR_GOOGLE_MAPS_KEY') !== -1) return;
+
+            var init = function () {
+                if (!window.google || !window.google.maps) return;
+                input._p2ac = true;
+
+                // Use the new PlaceAutocompleteElement if available (March 2025+)
+                if (window.google.maps.places && window.google.maps.places.PlaceAutocompleteElement) {
+                    try {
+                        var pac = new google.maps.places.PlaceAutocompleteElement();
+                        pac.id = 'pickupAddressPAC';
+                        // Mirror styling from the original input
+                        pac.style.cssText = 'width:100%;display:block;';
+                        input.parentNode.insertBefore(pac, input.nextSibling);
+                        input.style.display = 'none'; // hide original, PAC element replaces it visually
+
+                        pac.addEventListener('gmp-select', async function (ev) {
+                            var place = ev.placePrediction.toPlace();
+                            await place.fetchFields({ fields: ['displayName','formattedAddress','location'] });
+                            input.value = place.formattedAddress || place.displayName || '';
+                            var latEl = document.getElementById('pickupLat');
+                            var lngEl = document.getElementById('pickupLng');
+                            if (place.location) {
+                                if (latEl) latEl.value = place.location.lat();
+                                if (lngEl) lngEl.value = place.location.lng();
+                            }
+                        });
+                    } catch (e) {
+                        input.style.display = '';
+                        console.warn('PlaceAutocompleteElement init failed, falling back:', e.message);
+                    }
+
+                // Fallback: legacy Autocomplete (still works for existing customers)
+                } else if (window.google.maps.places && window.google.maps.places.Autocomplete) {
+                    try {
+                        var ac = new google.maps.places.Autocomplete(input, { types: ['geocode'] });
+                        ac.addListener('place_changed', function () {
+                            var place = ac.getPlace();
+                            if (!place.geometry) return;
+                            var latEl = document.getElementById('pickupLat');
+                            var lngEl = document.getElementById('pickupLng');
+                            if (latEl) latEl.value = place.geometry.location.lat();
+                            if (lngEl) lngEl.value = place.geometry.location.lng();
+                        });
+                    } catch (e) {
+                        console.warn('Autocomplete init failed:', e.message);
+                    }
+                }
+            };
+
+            if (window._googleMapsReady) init();
+            else document.addEventListener('google-maps-ready', init, { once: true });
+        };
+
+        /* ── B. HOST LIVE TRACKING MAP ──────────────── */
+        proto.openTrackingView = async function (donationRequestId) {
+            var section   = document.getElementById('trackingSection');
+            var mapDiv    = document.getElementById('liveMapEl');
+            var metaDiv   = document.getElementById('trackMeta');
+            var container = document.getElementById('trackingMapContainer');
+            if (!section) return;
+            section.style.display = 'block';
+            section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            if (container) container.innerHTML = '<div class="map-loading">Loading tracking data...</div>';
+            if (mapDiv)  mapDiv.style.display  = 'none';
+            if (metaDiv) metaDiv.style.display = 'none';
+            try {
+                var res  = await this.api.getTrackingData(donationRequestId);
+                var data = res.data;
+                if (!data.trackable) {
+                    if (container) container.innerHTML =
+                        '<div class="map-message"><p>Live tracking activates once the volunteer is <strong>En Route</strong> or has <strong>Collected Food</strong>.</p>' +
+                        '<p>Current status: <strong>' + (STATUS_LABELS[data.status] || data.status) + '</strong></p></div>';
+                    return;
+                }
+                if (container) container.innerHTML = '';
+                if (mapDiv)  mapDiv.style.display  = 'block';
+                if (metaDiv) metaDiv.style.display = 'flex';
+                var self = this;
+                var initMap = function () {
+                    if (!window.google || !window.google.maps) return;
+                    var volPos    = data.volunteer.lat && data.volunteer.lng ? { lat: data.volunteer.lat, lng: data.volunteer.lng } : null;
+                    var pickupPos = data.pickup.lat    && data.pickup.lng    ? { lat: data.pickup.lat,    lng: data.pickup.lng    } : null;
+                    var center    = volPos || pickupPos || { lat: 13.0827, lng: 80.2707 };
+                    var map = new google.maps.Map(mapDiv, { center: center, zoom: 14, mapTypeControl: false, streetViewControl: false });
+                    var volMarker = new google.maps.Marker({ position: volPos || center, map: map, title: 'Volunteer: ' + (data.volunteer.name || ''),
+                        icon: { url: 'https://maps.google.com/mapfiles/ms/icons/blue-dot.png', scaledSize: new google.maps.Size(36,36) } });
+                    if (pickupPos) new google.maps.Marker({ position: pickupPos, map: map, title: 'Pickup: ' + data.pickup.address,
+                        icon: { url: 'https://maps.google.com/mapfiles/ms/icons/orange-dot.png', scaledSize: new google.maps.Size(32,32) } });
+                    var volNameEl = document.getElementById('trackVolunteerName');
+                    var updatedEl = document.getElementById('trackLastUpdated');
+                    if (volNameEl) volNameEl.textContent = 'Volunteer: ' + (data.volunteer.name || '');
+                    if (updatedEl) updatedEl.textContent = data.volunteer.lastUpdated ? 'Updated: ' + new Date(data.volunteer.lastUpdated).toLocaleTimeString() : 'Awaiting location...';
+                    if (self._socket) {
+                        var token = localStorage.getItem('community_token');
+                        self._socket.emit('track_request', { token: token, donationRequestId: donationRequestId });
+                        self._socket.on('location_update', function (payload) {
+                            volMarker.setPosition({ lat: payload.lat, lng: payload.lng });
+                            map.panTo({ lat: payload.lat, lng: payload.lng });
+                            if (updatedEl) updatedEl.textContent = 'Updated: ' + new Date(payload.timestamp).toLocaleTimeString();
+                        });
+                    }
+                };
+                if (window._googleMapsReady) initMap();
+                else document.addEventListener('google-maps-ready', initMap, { once: true });
+            } catch (err) {
+                if (container) container.innerHTML = '<div class="map-message" style="color:#ef4444;">Could not load tracking: ' + err.message + '</div>';
+            }
+        };
+
+        /* ── C. VOLUNTEER DIRECTIONS ────────────────── */
+        proto.openDirections = function (delivery) {
+            var getPos = function () {
+                return new Promise(function (resolve) {
+                    if (navigator.geolocation) {
+                        navigator.geolocation.getCurrentPosition(
+                            function (p) { resolve(p.coords.latitude + ',' + p.coords.longitude); },
+                            function ()  { resolve('My+Location'); }
+                        );
+                    } else resolve('My+Location');
+                });
+            };
+            getPos().then(function (origin) {
+                var wp   = encodeURIComponent(delivery.pickupAddress  || '');
+                var dest = encodeURIComponent(delivery.charityAddress || delivery.pickupAddress || '');
+                window.open('https://www.google.com/maps/dir/?api=1&origin=' + origin + '&waypoints=' + wp + '&destination=' + dest + '&travelmode=driving', '_blank');
+            });
+        };
+
+        /* ── E. RECURRING DONATIONS ─────────────────── */
+        proto.loadRecurringDonations = async function () {
+            var el = document.getElementById('recurringContainer');
+            if (!el) return;
+            el.innerHTML = '<p style="color:#6b7280;font-size:.875rem;">Loading...</p>';
+            try {
+                var res  = await this.api.getMyRecurringDonations();
+                var list = res.data.templates || [];
+                if (!list.length) { el.innerHTML = '<p style="color:#6b7280;font-size:.875rem;">No recurring donations scheduled yet.</p>'; return; }
+                var days = ['','Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+                el.innerHTML = list.map(function (t) {
+                    return '<div class="recurring-card ' + (t.is_active ? '' : 'inactive') + '">' +
+                        '<div class="rc-header"><span class="rc-food">' + t.food_description + '</span>' +
+                        '<span>' + (t.is_active ? '🟢 Active' : '⚫ Paused') + '</span></div>' +
+                        '<div class="rc-meta">Every <strong>' + (days[t.recurrence_day] || t.recurrence_day) + '</strong>' +
+                        (t.preferred_time ? ' at ' + t.preferred_time : '') + ' &nbsp;&middot;&nbsp; ' + t.quantity + ' &nbsp;&middot;&nbsp; ' + t.pickup_address +
+                        (t.is_vegan       ? ' &nbsp;<span class="badge-vegan">🌱 Vegan</span>'   : '') +
+                        (t.is_gluten_free ? ' &nbsp;<span class="badge-gf">🌾 GF</span>'         : '') + '</div>' +
+                        '<div class="rc-actions">' +
+                        '<button class="btn-outline btn-sm" onclick="app.toggleRecurring(\'' + t.id + '\',' + (!t.is_active) + ')">' + (t.is_active ? 'Pause' : 'Resume') + '</button>' +
+                        '<button class="btn-danger" onclick="app.deleteRecurring(\'' + t.id + '\')">Delete</button></div></div>';
+                }).join('');
+            } catch (err) {
+                // 500 most likely means the recurring_donations table hasn't been created yet —
+                // show a soft message rather than a hard error so the rest of the page still works.
+                el.innerHTML = '<p style="color:#9ca3af;font-size:.82rem;">Recurring donations unavailable — run the Phase 2 DB migration to enable this feature.</p>';
+            }
+        };
+        proto.toggleRecurring = async function (id, isActive) {
+            try { await this.api.updateRecurringDonation(id, { isActive: isActive }); this.showToast('Updated.', 'success'); this.loadRecurringDonations(); }
+            catch (err) { this.showToast('Could not update: ' + err.message, 'error'); }
+        };
+        proto.deleteRecurring = async function (id) {
+            if (!confirm('Delete this recurring donation template?')) return;
+            try { await this.api.deleteRecurringDonation(id); this.showToast('Deleted.', 'success'); this.loadRecurringDonations(); }
+            catch (err) { this.showToast('Could not delete: ' + err.message, 'error'); }
+        };
+        proto.handleCreateRecurring = async function (e) {
+            e.preventDefault();
+            var f = e.target;
+            // Fields use rec_ prefix to avoid colliding with the main donation form
+            var foodDescription = (f.rec_foodDescription && f.rec_foodDescription.value) || '';
+            var quantity        = (f.rec_quantity        && f.rec_quantity.value)        || '';
+            var pickupAddress   = (f.rec_pickupAddress   && f.rec_pickupAddress.value)   || '';
+            var contactPhone    = (f.rec_contactPhone    && f.rec_contactPhone.value)    || null;
+            var recurrenceDay   = parseInt((f.rec_recurrenceDay && f.rec_recurrenceDay.value) || '1');
+            var preferredTime   = (f.rec_preferredTime   && f.rec_preferredTime.value)   || null;
+            var isVegan         = !!(f.rec_isVegan       && f.rec_isVegan.checked);
+            var isGlutenFree    = !!(f.rec_isGlutenFree  && f.rec_isGlutenFree.checked);
+            if (!foodDescription || !quantity || !pickupAddress) {
+                this.showToast('Please fill in Food Description, Quantity, and Pickup Address.', 'error');
+                return;
+            }
+            try {
+                await this.api.createRecurringDonation({
+                    foodDescription, quantity, pickupAddress,
+                    contactPhone, recurrenceDay, preferredTime, isVegan, isGlutenFree
+                });
+                this.showToast('Recurring donation scheduled! \u2705', 'success');
+                f.reset();
+                this.loadRecurringDonations();
+            } catch (err) { this.showToast('Error: ' + err.message, 'error'); }
+        };
+
+        /* ── F. DIETARY FILTERS ─────────────────────── */
+        proto.loadFilteredAvailableRequests = async function () {
+            var container = document.getElementById('charityOrdersList');
+            if (!container) return;
+            container.innerHTML = '<div class="loading-state">Filtering...</div>';
+            var vegan      = !!(document.getElementById('filterVegan')      && document.getElementById('filterVegan').checked);
+            var glutenFree = !!(document.getElementById('filterGlutenFree') && document.getElementById('filterGlutenFree').checked);
+            try {
+                var res      = await this.api.getAvailableRequestsFiltered({ vegan: vegan, glutenFree: glutenFree });
+                var requests = res.data.requests || [];
+                if (!requests.length) { container.innerHTML = '<div class="loading-state">No donations match your filters.</div>'; return; }
+                container.innerHTML = requests.map(function (r) {
+                    return '<div style="background:var(--bg-card,#fff);border:1px solid var(--border,#e5e7eb);border-radius:10px;padding:1rem;margin-bottom:.75rem;">' +
+                        '<div style="font-weight:700;margin-bottom:.4rem;">' + r.food_description + '</div>' +
+                        '<div style="margin-bottom:.5rem;">' +
+                        (r.is_vegan       ? '<span class="badge-vegan">🌱 Vegan</span>&nbsp;' : '') +
+                        (r.is_gluten_free ? '<span class="badge-gf">🌾 Gluten-Free</span>&nbsp;' : '') +
+                        '<span style="font-size:.8rem;color:#6b7280;">' + r.quantity + '</span></div>' +
+                        '<div style="font-size:.82rem;color:#6b7280;margin-bottom:.75rem;">By: ' + (r.host_name || '-') + ' &middot; ' + r.pickup_address + '</div>' +
+                        '<button class="btn-primary" onclick="app.charityAcceptRequest(\'' + r.id + '\')">Accept Donation</button></div>';
+                }).join('');
+            } catch (err) { container.innerHTML = '<div class="loading-state" style="color:#ef4444;">Error: ' + err.message + '</div>'; }
+        };
+
+        /* ── G. STAR RATING / FEEDBACK ──────────────── */
+        proto.loadFeedbackWidget = async function (donationRequestId, containerId) {
+            var el = document.getElementById(containerId);
+            if (!el) return;
+            try {
+                var res = await this.api.getFeedback(donationRequestId);
+                var feedback = res.data.feedback;
+                var averageRating = res.data.averageRating;
+                var self = this;
+                var mine = feedback.filter(function (f) { return f.reviewer_id === (self.user && self.user.id); })[0];
+                if (mine) {
+                    el.innerHTML = '<div class="feedback-submitted"><span>Your rating: ' +
+                        '\u2605'.repeat(mine.rating) + '\u2606'.repeat(5 - mine.rating) + '</span>' +
+                        (mine.comment ? '<p style="font-style:italic;margin:.25rem 0 0;font-size:.82rem;">"' + mine.comment + '"</p>' : '') + '</div>';
+                } else {
+                    el.innerHTML = '<div class="feedback-widget"><p class="feedback-prompt">Rate this delivery:</p>' +
+                        '<div class="star-rating" id="stars-' + donationRequestId + '" data-selected="0">' +
+                        [1,2,3,4,5].map(function (n) {
+                            return '<span class="star" onclick="app.setStarRating(\'' + donationRequestId + '\',' + n + ')">\u2606</span>';
+                        }).join('') +
+                        '</div><input type="text" class="fb-comment-input" id="fb-comment-' + donationRequestId + '" placeholder="Leave a comment (optional)"/>' +
+                        '<button class="btn-primary btn-sm" onclick="app.submitFeedback(\'' + donationRequestId + '\',\'' + containerId + '\')">Submit Rating</button></div>';
+                }
+                if (averageRating !== null) {
+                    el.insertAdjacentHTML('beforeend', '<p class="feedback-avg">Avg: ' + averageRating.toFixed(1) + ' \u2605 (' + feedback.length + ' review' + (feedback.length !== 1 ? 's' : '') + ')</p>');
+                }
+            } catch (e) { /* silently skip — only available after COMPLETED */ }
+        };
+        proto.setStarRating = function (id, value) {
+            var row = document.getElementById('stars-' + id);
+            if (!row) return;
+            row.dataset.selected = value;
+            row.querySelectorAll('.star').forEach(function (s, i) {
+                s.textContent = i < value ? '\u2605' : '\u2606';
+                s.classList.toggle('selected', i < value);
+            });
+        };
+        proto.submitFeedback = async function (donationRequestId, containerId) {
+            var row    = document.getElementById('stars-' + donationRequestId);
+            var rating = parseInt((row && row.dataset.selected) || '0');
+            var commentEl = document.getElementById('fb-comment-' + donationRequestId);
+            var comment = (commentEl && commentEl.value) || null;
+            if (!rating) { this.showToast('Please select a star rating first.', 'error'); return; }
+            try {
+                await this.api.submitFeedback(donationRequestId, rating, comment);
+                this.showToast('Thank you for your feedback! \u2B50', 'success');
+                this.loadFeedbackWidget(donationRequestId, containerId);
+            } catch (err) { this.showToast('Error: ' + err.message, 'error'); }
+        };
+
+        /* ── H. VOLUNTEER AVAILABILITY TOGGLE ─────── */
+        proto.loadVolunteerAvailabilityToggle = async function () {
+            var el = document.getElementById('volunteerAvailabilityToggle');
+            if (!el || !this.user || this.user.role !== 'volunteer') return;
+            try {
+                var res    = await this.api.getVolunteerAvailability();
+                var active = res.data.isActive;
+                el.innerHTML =
+                    '<div class="availability-widget">' +
+                    '<span class="avail-label">' + (active ? '🟢 Available' : '🔴 Off Duty') + '</span>' +
+                    '<label class="toggle-switch">' +
+                    '<input type="checkbox" ' + (active ? 'checked' : '') + ' onchange="app.toggleAvailability(this.checked)"/>' +
+                    '<span class="toggle-slider"></span></label></div>';
+            } catch (e) { /* silently skip */ }
+        };
+        proto.toggleAvailability = async function (isActive) {
+            try {
+                var res = await this.api.setVolunteerAvailability(isActive);
+                this.showToast(res.data.message, 'success');
+                this.loadVolunteerAvailabilityToggle();
+            } catch (err) { this.showToast('Could not update: ' + err.message, 'error'); }
+        };
+
+        /* ── I. ADMIN CSV EXPORT & TOOLS ────────────── */
+        proto.downloadCSV = function () {
+            var status = (document.getElementById('csvStatus') || {}).value || '';
+            var from   = (document.getElementById('csvFrom')   || {}).value || '';
+            var to     = (document.getElementById('csvTo')     || {}).value || '';
+            var url    = this.api.getCSVExportUrl({ status: status, from: from, to: to });
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = 'community_export.csv';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            this.showToast('CSV download started...', 'info');
+        };
+        proto.adminTriggerRecurring = async function () {
+            try {
+                var res = await this.api.triggerRecurring();
+                this.showToast(res.data.message, 'success');
+            } catch (err) { this.showToast('Error: ' + err.message, 'error'); }
+        };
+
+        /* ── PATCH init() ────────────────────────────── */
+        var _origInit = proto.init;
+        proto.init = function () {
+            _origInit.call(this);
+            this.initDarkMode();
+            this.setupDarkModeToggle();
+        };
+
+        /* ── PATCH navigateTo() ──────────────────────── */
+        var _origNav = proto.navigateTo;
+        proto.navigateTo = function (page) {
+            _origNav.call(this, page);
+            if (page === 'donate')    { this.loadRecurringDonations(); this.initPlacesAutocomplete(); }
+            if (page === 'volunteer') { this.loadVolunteerAvailabilityToggle(); }
+            if (page === 'charity')   { this.loadFilteredAvailableRequests(); }
+        };
+
+        console.log('%c Phase 2 features loaded \u2705', 'background:#22c55e;color:#fff;padding:2px 6px;border-radius:4px;');
+    })();
+    </script>
 
     <!-- Enhancement scripts (FAQ accordion + counter animation) -->
     <script>
