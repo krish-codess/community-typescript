@@ -111,11 +111,16 @@ function authMiddleware(req, res, next) {
     const token = (req.headers['authorization'] || '').split(' ')[1];
     if (!token) return fail(res, 'No token provided', 401);
     try {
-        req.user = jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret');
+        req.user = jwt.verify(token, process.env.JWT_SECRET || 'community-dev-secret-change-in-production');
         next();
     } catch {
         return fail(res, 'Invalid or expired token', 401);
     }
+}
+
+// Warn loudly if JWT_SECRET is not set — never silently use a weak default
+if (!process.env.JWT_SECRET) {
+    console.warn('⚠️  WARNING: JWT_SECRET not set in .env — using insecure default. Set JWT_SECRET before deploying to production.');
 }
 
 function requireRole(...roles) {
@@ -300,7 +305,7 @@ async function initSchema() {
                 status                VARCHAR(40) DEFAULT 'REQUESTED',
                 accepted_by_charity   VARCHAR(20),
                 assigned_volunteer    VARCHAR(20),
-                receipt_path          VARCHAR(500) NULL,
+                receipt_path          VARCHAR(1000) NULL,
                 created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 FOREIGN KEY (host_id) REFERENCES users(id),
@@ -456,7 +461,7 @@ app.post('/api/community/auth/register', async (req, res) => {
             );
         }
 
-        const token = jwt.sign({ id, email, role }, process.env.JWT_SECRET || 'fallback-secret', { expiresIn: '7d' });
+        const token = jwt.sign({ id, email, role }, process.env.JWT_SECRET || 'community-dev-secret-change-in-production', { expiresIn: '7d' });
         ok(res, { token, user: { id, name, email, role, phone } });
     } catch (err) {
         console.error('Register:', err);
@@ -478,7 +483,7 @@ app.post('/api/community/auth/login', async (req, res) => {
 
         const token = jwt.sign(
             { id: user.id, email: user.email, role: user.role },
-            process.env.JWT_SECRET || 'fallback-secret',
+            process.env.JWT_SECRET || 'community-dev-secret-change-in-production',
             { expiresIn: '7d' }
         );
         ok(res, { token, user: { id: user.id, name: user.name, email: user.email, role: user.role, phone: user.phone } });
@@ -743,6 +748,42 @@ app.post('/api/community/charity/complete/:id', authMiddleware, requireRole('cha
     } catch (err) {
         console.error('Complete:', err);
         fail(res, 'Could not complete request', 500);
+    }
+});
+
+
+/**
+ * POST /charity/cancel/:id
+ * Allows a charity to cancel a request they accidentally accepted,
+ * returning it to REQUESTED status so other charities can claim it.
+ * Only allowed when status is ACCEPTED_BY_CHARITY (no volunteer yet).
+ */
+app.post('/api/community/charity/cancel/:id', authMiddleware, requireRole('charity'), async (req, res) => {
+    const { id }     = req.params;
+    const { reason } = req.body;
+    const conn       = await db.getConnection();
+    try {
+        await conn.beginTransaction();
+        const [rows] = await conn.query('SELECT * FROM donation_requests WHERE id=? AND accepted_by_charity=? FOR UPDATE', [id, req.user.id]);
+        if (!rows.length) { await conn.rollback(); return fail(res, 'Request not found or not yours', 404); }
+        if (rows[0].status !== STATUS.ACCEPTED_BY_CHARITY) {
+            await conn.rollback();
+            return fail(res, `Cannot cancel at status: ${rows[0].status}. You can only cancel before a volunteer is assigned.`);
+        }
+        await conn.query(
+            'UPDATE donation_requests SET status=?, accepted_by_charity=NULL WHERE id=?',
+            [STATUS.REQUESTED, id]
+        );
+        await conn.commit();
+        await logEvent(id, req.user.id, 'charity', 'Charity cancelled — returned to available pool', reason ? `Reason: ${reason}` : null);
+        emitStatusUpdate(id, STATUS.REQUESTED, 'charity');
+        ok(res, { message: 'Cancelled. The request is now available for other charities.', status: STATUS.REQUESTED });
+    } catch (err) {
+        await conn.rollback();
+        console.error('Charity cancel:', err);
+        fail(res, 'Could not cancel request', 500);
+    } finally {
+        conn.release();
     }
 });
 
@@ -1293,7 +1334,7 @@ app.get('/api/community/admin/stale-requests', authMiddleware, requireRole('admi
 io.on('connection', (socket) => {
     socket.on('track_request', async ({ token, donationRequestId }) => {
         try {
-            const payload = jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret');
+            const payload = jwt.verify(token, process.env.JWT_SECRET || 'community-dev-secret-change-in-production');
             const [rows] = await db.query(
                 'SELECT host_id, accepted_by_charity FROM donation_requests WHERE id = ?',
                 [donationRequestId]
@@ -1307,7 +1348,7 @@ io.on('connection', (socket) => {
 
     socket.on('volunteer_location', async ({ token, donationRequestId, lat, lng }) => {
         try {
-            const payload = jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret');
+            const payload = jwt.verify(token, process.env.JWT_SECRET || 'community-dev-secret-change-in-production');
             if (payload.role !== 'volunteer') return;
             await db.query(
                 'UPDATE volunteers SET current_lat=?, current_lng=?, location_updated_at=NOW() WHERE user_id=?',
@@ -1516,7 +1557,9 @@ app.post('/api/community/admin/recurring/trigger', authMiddleware, requireRole('
 // STATIC FILE SERVING
 // ─────────────────────────────────────────
 
-const FRONTEND = path.join(__dirname, '..', 'frontend', 'community-ts');
+// FRONTEND path: defaults to ../frontend/community-ts relative to server.js.
+// Override with FRONTEND_PATH env var if your folder structure differs.
+const FRONTEND = process.env.FRONTEND_PATH || path.join(__dirname, '..', 'frontend', 'community-ts');
 console.log('📁 Serving frontend from:', FRONTEND);
 app.use(express.static(FRONTEND));
 
@@ -1536,6 +1579,10 @@ app.get('*', (req, res) => {
 // ─────────────────────────────────────────
 // START  (use server.listen, not app.listen)
 // ─────────────────────────────────────────
+
+// Graceful shutdown — releases port cleanly on Ctrl+C
+process.on('SIGINT',  () => { console.log('\n🛑 Shutting down…'); server.close(() => { db.end(); process.exit(0); }); });
+process.on('SIGTERM', () => { server.close(() => { db.end(); process.exit(0); }); });
 
 server.listen(PORT, () => {
     console.log(`\n🚀 COMMUNITY — single server on port ${PORT}`);

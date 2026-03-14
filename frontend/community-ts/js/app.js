@@ -190,6 +190,8 @@ class CommunityApp {
         if (page === 'donate')       this.loadHostDashboard();
         if (page === 'volunteer')    this.loadVolunteerDashboard();
         if (page === 'charity') {
+            const dashEl = document.getElementById('charityDashboard');
+            if (dashEl) dashEl.classList.add('active');
             this.loadCharityDashboard();
         }
         if (page === 'dashboard')    this.loadDashboardData();
@@ -541,7 +543,15 @@ class CommunityApp {
         const color = STATUS_COLORS[r.status] || '#6b7280';
 
         let actionBtn = '';
-        if (r.status === 'FOOD_PICKED_UP') {
+        if (r.status === 'ACCEPTED_BY_CHARITY') {
+            // Allow charity to cancel a mistaken accept (no volunteer yet)
+            actionBtn = `
+            <button class="btn-outline btn-sm full-width mt-sm"
+                    style="color:#ef4444;border-color:#ef4444;"
+                    onclick="app.charityCancelRequest('${r.id}')">
+              ✕ Cancel This Acceptance
+            </button>`;
+        } else if (r.status === 'FOOD_PICKED_UP') {
             actionBtn = `
             <div class="photo-upload-group mt-sm">
               <label class="small-label">📷 Proof of Delivery URL (optional)</label>
@@ -609,6 +619,18 @@ class CommunityApp {
             await this.loadCharityMyRequests();
         } catch (err) {
             this.showToast(err.message || 'Could not complete delivery.', 'error');
+        }
+    }
+
+    async charityCancelRequest(id) {
+        const reason = window.prompt('Reason for cancelling (optional — helps the host understand):');
+        if (reason === null) return; // user pressed Cancel
+        try {
+            await this.api.cancelAcceptedRequest(id, reason || null);
+            this.showToast('Acceptance cancelled. The donation is back in the available pool.', 'info');
+            await this.loadCharityDashboard();
+        } catch (err) {
+            this.showToast(err.message || 'Could not cancel.', 'error');
         }
     }
 
